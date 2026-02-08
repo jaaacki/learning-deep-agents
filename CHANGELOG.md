@@ -9,6 +9,20 @@
 
 ---
 
+## v0.5.1 — 2026-02-08
+
+### Added
+- **issues.opened webhook handler** (Issue #13) — when a new issue is opened, the webhook listener triggers triage + analysis automatically
+- `handleIssuesEvent()` function: extracts issue number, calls `runAnalyzeSingle`, catches errors gracefully
+- `handleWebhookEvent()` dispatcher: routes events by type (issues -> handleIssuesEvent, others -> no-op for now)
+- `IssuesHandlerResult` interface for structured handler responses
+- Fire-and-forget pattern: HTTP 200 is returned immediately, analysis runs async (GitHub's 10s timeout is never hit)
+- `createWebhookApp()` and `startWebhookServer()` now accept optional `Config` to enable event handling
+- `cli.ts` passes full config to `startWebhookServer` so events are actually processed
+- 10 new tests covering: opened triggers analysis, edited/closed ignored, missing data handling, error catching, dispatcher routing
+
+---
+
 ## v0.5.0 — 2026-02-08
 
 **Milestone: Phase 5 (Resilience) complete.** Transient API failures are retried. Container stops don't lose work. Agent actions can be retracted by humans via CLI. Tool calls are logged with arguments and timing.

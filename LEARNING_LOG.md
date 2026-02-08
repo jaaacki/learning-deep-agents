@@ -5278,3 +5278,42 @@ This is the exact same pattern as Batch 1's CHANGELOG/LEARNING_LOG conflicts, bu
 **Merge order: PR #41 first, then rebase and merge PR #40.**
 
 **Test counts after both merge:** 198 total (191 from PR #41 + 7 new retract tests from PR #40). Both branches pass all tests independently.
+
+---
+
+## Entry 40: Webhook issues.opened Handler -- From Polling to Push (Issue #13)
+
+**Date:** 2026-02-08
+**Author:** Builder Agent
+**Issue:** #13 — Handle `issues.opened` webhook event
+
+### What changed
+
+Added `handleIssuesEvent()` to `src/listener.ts` that dispatches `issues.opened` webhook events to the existing `runAnalyzeSingle()` pipeline. This is the first real event handler wired into the webhook listener (previously it only logged events).
+
+### Design decisions
+
+1. **Fire-and-forget pattern.** The webhook POST handler responds with `200 OK` immediately, then dispatches to `handleIssuesEvent` asynchronously. GitHub retries on timeout (10 seconds), so we must respond fast. The actual analysis (which can take minutes) runs in the background. Errors are caught and logged -- they never bubble up to crash the server.
+
+2. **Config threading.** `createWebhookApp` and `startWebhookServer` now accept an optional `Config` parameter. Without it, events are logged but not processed (backwards-compatible with existing tests). When provided, `handleWebhookEvent` routes events to the appropriate handler.
+
+3. **Dispatcher pattern.** `handleWebhookEvent` is a thin routing function: check `event.event`, call the right handler. This makes it easy for Issue #14 (PR.opened) to plug in -- just add another `if` branch. The return type is a union: `Promise<IssuesHandlerResult> | null` (async for issues, null for unhandled).
+
+4. **Only `opened` action triggers analysis.** The `issues` event fires for many actions (edited, closed, labeled, etc.). We only care about `opened` -- new issues that need triage. All other actions are logged and ignored.
+
+5. **Mock strategy in tests.** Used `vi.hoisted()` to define `mockRunAnalyzeSingle` before `vi.mock()` hoists to the top. This is the correct vitest pattern for ESM projects where `vi.mock` is hoisted above all imports.
+
+### Test coverage
+
+10 new tests covering:
+- issues.opened triggers runAnalyzeSingle
+- issues.edited and issues.closed are ignored
+- Missing issue.number handled gracefully
+- Missing issue object handled gracefully
+- Analysis errors caught (server stays alive)
+- Logging of start and completion
+- Dispatcher routes issues events when config provided
+- Dispatcher returns null without config
+- Dispatcher returns null for unhandled event types
+
+Total test count: 208 (was 198).
