@@ -3306,3 +3306,158 @@ Plus the quick fixes: cron lock file and code-enforced maxIssuesPerRun (v0.2.7).
 Phase 3 (CLI & Testing) was completed earlier. The next milestone is Phase 4 (Intelligence).
 
 ---
+
+## Entry 22: Critic Review -- Phase 2 Remainder + v0.3.0 Milestone Decision
+
+**Date:** 2026-02-08
+**Author:** Critic Agent
+**Reviewed:** Tasks #16-#19 (v0.2.7 through v0.2.10)
+**Scope:** Cron lock file, maxIssuesPerRun enforcement, true dry-run, circuit breaker, per-issue action tracking
+
+This review covers the final four Phase 2 implementations. With these, all 7 Phase 2 issues (#5, #6, #7, #8, #9, #10, #11) and both Phase 3 issues (#23, #24) are complete. The central question is: should we bump to v0.3.0?
+
+### Overall Assessment
+
+The implementations are solid. Each addresses a real safety concern with a clean, testable design. The code is well-structured and the teaching notes are accurate and valuable. I have 9 findings -- mostly low severity, with one medium design concern. No HIGH-severity issues.
+
+### Findings
+
+**Finding #1: Lock file cleanup on kill -9 (poll.sh) -- Low**
+
+The `mkdir`/`trap ... EXIT` lock pattern is correct and handles normal exits, `set -e` failures, and most signals. However, `kill -9` (SIGKILL) bypasses all traps. If the agent process is force-killed, `poll.lock/` will persist and all future cron runs will be skipped forever.
+
+This is a known limitation of all lock file schemes. Mitigation options:
+- Document that `rmdir poll.lock` is the manual recovery step
+- Add a staleness check based on lock directory age (e.g., skip if lock is older than 1 hour)
+
+For a learning project, the current approach is fine. The teaching note correctly explains why `mkdir` beats PID files. But for production use, a staleness check would be important.
+
+**Teaching moment:** Every lock scheme has a failure mode. PID files have race conditions. `mkdir` has the SIGKILL problem. `flock(2)` is automatically released on process death but is not portable to all NFS mounts. There is no perfect lock -- only trade-offs.
+
+**Finding #2: Circuit breaker default of 30 may be too tight -- Medium**
+
+The default `maxToolCallsPerRun` is 30. Entry 20 estimates a normal 5-issue run uses ~30 tool calls: `5 x (1 fetch + 2 reads + 1 comment + 1 branch + 1 PR) = 30`.
+
+But this estimate undercuts the actual workflow. The agent also calls `write_todos` (1 call) and `write_file` for each issue (5 calls), plus `list_repo_files` (at least 1 per issue, possibly more). A realistic 5-issue run is closer to:
+- 1 `fetch_github_issues` + 1 `write_todos` = 2
+- Per issue: 1 `list_repo_files` + 2 `read_repo_file` + 1 `write_file` + 1 `comment` + 1 `branch` + 1 `PR` = 7
+- Total: 2 + (5 x 7) = 37
+
+With the default of 30, a legitimate 5-issue run will trip the circuit breaker around issue #4 or #5. This means the circuit breaker fires during *normal* operation, not just runaway loops.
+
+**Recommendation:** Raise the default to 50 or make it `maxIssuesPerRun * 10`. The current default will cause confusion for learners who think the agent is broken.
+
+**Finding #3: `wrapWithCircuitBreaker` mutates the original tool object -- Low**
+
+```typescript
+export function wrapWithCircuitBreaker<T>(wrappedTool: T, counter: ToolCallCounter): T {
+  const originalInvoke = wrappedTool.invoke.bind(wrappedTool);
+  wrappedTool.invoke = async (input, options) => { ... };
+  return wrappedTool;  // returns the same object, now mutated
+}
+```
+
+This mutates the `invoke` method of the original tool. The function signature suggests it returns a wrapped copy (it accepts and returns `T`), but it modifies in place. If someone called `wrapWithCircuitBreaker` twice on the same tool, the counter would be checked twice per call.
+
+In the current code this is safe because `agent.ts` only wraps once. But it violates the principle of least surprise. A cleaner approach would be to create a new tool object with the wrapped invoke.
+
+**Teaching moment:** Functions named `wrapX` conventionally return a new wrapper, leaving the original untouched. When you mutate the original instead, document it clearly -- or better, create a new object.
+
+**Finding #4: Dry-run wrappers duplicate Zod schemas -- Low**
+
+Each dry-run wrapper (`createDryRunCommentTool`, etc.) defines its own Zod schema that duplicates the real tool's schema. If the real tool's schema changes (e.g., adding a `labels` parameter to `comment_on_issue`), the dry-run wrapper must be updated separately.
+
+This is acceptable at the current scale (3 write tools). But if the tool count grows, consider extracting the schemas to shared constants so both real and dry-run tools reference the same definition.
+
+**Finding #5: `extractIssueActions` uses fragile branch name parsing -- Low**
+
+The function extracts issue numbers from branch names using `String(args.branch_name).match(/^issue-(\d+)/)`. This works for branches following the `issue-N-description` convention but silently ignores branches with other naming patterns.
+
+Similarly, it parses PR response JSON looking for `parsed.title.match(/Fix #(\d+)/)`. These heuristics are reasonable but brittle -- if the agent ever changes its naming convention, action tracking breaks silently.
+
+For a learning project this is fine. The teaching note in Entry 21 correctly identifies the convention dependency. For production, the agent should pass structured metadata (issue number) alongside each tool call.
+
+**Finding #6: Circuit breaker wraps only custom GitHub tools, not built-in deepagents tools -- Low**
+
+In `agent.ts`, the circuit breaker wraps all 6 GitHub tools. But the agent also has access to `write_todos`, `read_file`, and `write_file` from the `deepagents` package. These are not wrapped because they are added by `createDeepAgent()` internally, not passed in the `tools` array.
+
+This means a looping agent that only calls `write_todos` or `write_file` repeatedly would not trip the circuit breaker. In practice this is unlikely (the agent loop usually involves GitHub API calls), but it is an incomplete safety boundary.
+
+**Teaching moment:** When adding cross-cutting concerns (circuit breaker, rate limiter, logging), the boundary must cover *all* tools, not just the ones you control. This is a challenge when using frameworks that add tools internally.
+
+**Finding #7: `runAnalyzeSingle` has no circuit breaker -- Low**
+
+`runPollCycle` creates the agent with `{ maxIssues, dryRun, maxToolCalls }`, but `runAnalyzeSingle` creates the agent with no options: `createDeepAgentWithGitHub(config)`. This means `analyze --issue 42` runs without a circuit breaker or dry-run capability.
+
+The `analyze` command is for single-issue use, so runaway loops are less likely. But for consistency, it should pass through the same safety options.
+
+**Finding #8: `migratePollState` assumes `commented: true` for old issues -- Info**
+
+When migrating old poll state (no `issues` field), the function marks all issues as `commented: true, branch: null, pr: null`. The assumption that the comment was posted is reasonable (the old code only recorded issues after commenting), but the branch and PR could also have been created.
+
+Entry 21 documents this assumption clearly. The consequence is that on the first run after migration, the agent may skip comments (good) but will retry branches and PRs (which are idempotent, so harmless). Correct behavior.
+
+**Finding #9: CHANGELOG v0.2.5 still references old `--dry-run` behavior -- Info**
+
+The v0.2.5 CHANGELOG entry says:
+- `--dry-run flag for poll command (no poll state written)`
+- `dry-run shorthand command (equivalent to poll --dry-run)`
+
+This is now outdated. The `--dry-run` flag was renamed to `--no-save` in the Architect's rename (not versioned), then `--dry-run` was reintroduced in v0.2.8 with different (stronger) semantics. A reader going through the CHANGELOG chronologically will be confused.
+
+**Recommendation:** Update the v0.2.5 entry to reference `--no-save` (its current name) or add a note that this was superseded by v0.2.8.
+
+### Teaching Notes Accuracy
+
+All four entries (18-21) are well-written and technically accurate.
+
+- Entry 18: `mkdir` atomicity explanation is correct. `trap EXIT` coverage is accurate.
+- Entry 19: Tool swapping vs. runtime flag comparison is a genuinely useful architectural lesson. The four reasons for choosing Option B are sound.
+- Entry 20: The throw-vs-return distinction for circuit breakers is an important insight. Exit code 2 for monitoring is a good practice.
+- Entry 21: The JSON string-keys teaching note is a small but valuable gotcha for TypeScript developers.
+
+One minor note: Entry 21 lists "six Phase 2 issues" but then enumerates seven (#5, #6, #7, #8, #9, #10, #11). The count should say seven, not six.
+
+### Test Coverage Assessment
+
+Tests were added for all new functionality:
+
+| Feature | Tests | Quality |
+|---------|-------|---------|
+| `maxIssuesPerRun` clamping | 3 tests (clamp, no-clamp, no-limit) | Good -- covers all three code paths |
+| Dry-run wrappers | 6 tests (2 per tool: result shape + name match) | Good -- verifies tool name identity |
+| `ToolCallCounter` | 4 tests (increment, at-limit, over-limit, error shape) | Good -- boundary conditions covered |
+| `wrapWithCircuitBreaker` | 3 tests (counting, throw, cross-tool sharing) | Good -- the cross-tool test is especially valuable |
+| `getMaxToolCalls` | 5 tests (valid, missing, zero, negative, string) | Good -- mirrors getMaxIssues pattern |
+| `migratePollState` | 3 tests (new format, old format, empty) | Good |
+| `extractIssueActions` | 6 tests (empty, comment, branch, PR, merge, no-match) | Good -- covers the happy path and edge cases |
+| `buildUserMessage` with actions | 3 tests (partial, complete, no-actions) | Good |
+
+Total new tests: ~33 across the four tasks. Combined with the existing ~34 tests from Phase 3, the test suite is now at approximately 67 tests. This is strong coverage for a learning project.
+
+**Still missing:** `createListRepoFilesTool` tests (flagged in Entry 17, Finding #6). This remains the only untested tool.
+
+### Version Recommendation: Bump to v0.3.0
+
+**Yes, this is the right time for v0.3.0.**
+
+Rationale:
+1. **Phase 2 is complete.** All 7 issues (#5, #6, #7, #8, #9, #10, #11) are implemented and tested.
+2. **Phase 3 is complete.** Both issues (#23, #24) are implemented and tested.
+3. **The versioning plan maps v0.3.0 to Phase 2.** Since Phase 3 was completed out of order (before Phase 2 finished), consolidating both into v0.3.0 tells a cleaner story than bumping Phase 3 separately.
+4. **All previously-flagged HIGH issues are resolved.** The `--dry-run` semantics (Entry 17 Finding #2) is fixed. The cron lock file (flagged in Entries 7, 11, and 14) is implemented. The maxIssuesPerRun code enforcement (Entry 14 Finding #7) is done.
+
+The v0.3.0 CHANGELOG entry should note: "Phase 2 (Safety & Idempotency) + Phase 3 (CLI & Testing) complete."
+
+### Open Items Carried Forward
+
+| # | Finding | Severity | First flagged |
+|---|---------|----------|---------------|
+| 1 | `config.ts` uses `process.exit` instead of throwing | Low | Entry 7 |
+| 2 | Config type is `any` from `JSON.parse` | Low | Entry 7 |
+| 3 | `bin` field points to `.ts` file (npx fails) | Medium | Entry 17 |
+| 4 | No tests for `createListRepoFilesTool` | Medium | Entry 17 |
+| 5 | Circuit breaker default may be too tight (30) | Medium | This entry |
+| 6 | `runAnalyzeSingle` has no circuit breaker | Low | This entry |
+
+---

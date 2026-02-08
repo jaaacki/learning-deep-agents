@@ -3,9 +3,32 @@
 > **Versioning plan:** Patch bumps per issue, minor bumps at phase milestones.
 > See LEARNING_LOG.md Entry 8 for the full dependency map and version targets.
 >
-> v0.2.0 = Phase 1 (Code Awareness) | v0.3.0 = Phase 2 (Safety) | v0.4.0 = Phase 3 (CLI/Tests)
-> v0.5.0 = Phase 4 (Intelligence) | v0.6.0 = Phase 5 (Resilience) | v0.7.0 = Phase 6 (Webhooks)
-> v0.8.0 = Phase 7 (Deployment) | v1.0.0 = Phase 8 (Reviewer Bot)
+> v0.2.0 = Phase 1 (Code Awareness) | v0.3.0 = Phase 2 + 3 (Safety + CLI/Tests)
+> v0.4.0 = Phase 4 (Intelligence) | v0.5.0 = Phase 5 (Resilience) | v0.6.0 = Phase 6 (Webhooks)
+> v0.7.0 = Phase 7 (Deployment) | v1.0.0 = Phase 8 (Reviewer Bot)
+
+---
+
+## v0.3.0 — 2026-02-08
+
+**Milestone: Phase 2 (Safety & Idempotency) + Phase 3 (CLI & Testing) complete.**
+
+The bot is now safe for unattended operation. All write operations are idempotent, resource usage is bounded, and there's a CLI for development and debugging with 67 unit tests.
+
+### Phase 2 — Safety & Idempotency (Issues #5, #6, #7, #8, #9, #10, #11)
+- Max issues per run — code-enforced in tool constructor
+- Duplicate comment prevention via HTML marker detection
+- Duplicate branch prevention via getRef check
+- Duplicate PR prevention via pulls.list check
+- Circuit breaker — kills run after N tool calls
+- True --dry-run mode — swaps write tools with logging stubs
+- Per-issue action tracking in poll state with migration
+- Cron lock file in poll.sh
+
+### Phase 3 — CLI & Testing (Issues #23, #24)
+- CLI wrapper with subcommands: poll, analyze, status, dry-run, help
+- Core logic extracted to src/core.ts
+- 67 unit tests across 4 files (vitest)
 
 ---
 
