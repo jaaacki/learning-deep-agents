@@ -7,6 +7,8 @@ import {
   createCommentOnIssueTool,
   createBranchTool,
   createPullRequestTool,
+  createListRepoFilesTool,
+  createReadRepoFileTool,
 } from './github-tools.js';
 
 /**
@@ -25,6 +27,8 @@ export function createDeepAgentWithGitHub(config: Config) {
   const commentTool = createCommentOnIssueTool(owner, repo, octokit);
   const branchTool = createBranchTool(owner, repo, octokit);
   const prTool = createPullRequestTool(owner, repo, octokit);
+  const listFilesTool = createListRepoFilesTool(owner, repo, octokit);
+  const readFileTool = createReadRepoFileTool(owner, repo, octokit);
 
   // System prompt - full workflow instructions
   const systemPrompt = `You are a GitHub issue analysis agent for the repository ${owner}/${repo}.
@@ -34,8 +38,10 @@ When given issues to analyze, follow this workflow for EACH issue:
 1. ANALYZE the issue:
    - Read the title, body, and labels carefully
    - Identify the type of problem (bug, feature, docs, etc.)
+   - Use list_repo_files to see the repo structure and identify relevant files
+   - Use read_repo_file to read the source code of files related to the issue
    - Determine severity and complexity
-   - Think about what a fix would involve
+   - Think about what a fix would involve based on actual code
 
 2. COMMENT on the issue:
    - Use comment_on_issue to post a summary on the GitHub issue
@@ -66,6 +72,8 @@ IMPORTANT:
 
 Available tools:
 - fetch_github_issues: Fetch issues from the repo (supports 'since' for polling)
+- list_repo_files: List all files in the repo (supports path prefix filtering)
+- read_repo_file: Read a single file's contents from the repo
 - comment_on_issue: Post a comment on a GitHub issue
 - create_branch: Create a new branch in the repo
 - create_pull_request: Open a draft PR
@@ -77,7 +85,7 @@ Available tools:
   // Create the agent
   const agent = createDeepAgent({
     model,
-    tools: [githubIssuesTool, commentTool, branchTool, prTool],
+    tools: [githubIssuesTool, listFilesTool, readFileTool, commentTool, branchTool, prTool],
     systemPrompt,
   });
 

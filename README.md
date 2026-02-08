@@ -8,10 +8,11 @@ A learning project for understanding Deep Agents / LangGraph patterns. An AI age
 cron  -->  poll.sh  -->  npm start  -->  Agent runs
                                            |
                                            +--> 1. Fetch open issues (since last poll)
-                                           +--> 2. Analyze each issue
-                                           +--> 3. Comment summary on the issue
-                                           +--> 4. Write detailed analysis to ./issues/issue_<N>.md
-                                           +--> 5. Create branch + open draft PR
+                                           +--> 2. List repo files to understand codebase structure
+                                           +--> 3. Read relevant source files for code-aware analysis
+                                           +--> 4. Comment summary on the issue
+                                           +--> 5. Write detailed analysis to ./issues/issue_<N>.md
+                                           +--> 6. Create branch + open draft PR
 ```
 
 The agent never merges PRs. It only proposes fixes as drafts.
@@ -93,6 +94,8 @@ You should see output like:
 
 ============================================================
 📥 Fetching open issues from your-username/your-repo...
+📂 Listing files in your-username/your-repo...
+📖 Reading src/index.ts from your-username/your-repo (main)...
 💬 Commenting on issue #1 in your-username/your-repo...
 🌿 Creating branch 'issue-1-fix-something' from 'main'...
 📝 Creating draft PR 'Fix #1: Fix something' in your-username/your-repo...
@@ -173,7 +176,7 @@ deepagents/
     index.ts          -- Entry point, polling state management
     config.ts         -- Loads and validates config.json
     model.ts          -- LLM provider factory (Anthropic, OpenAI, Ollama, etc.)
-    github-tools.ts   -- GitHub API tools (fetch, comment, branch, PR)
+    github-tools.ts   -- GitHub API tools (fetch, list files, comment, branch, PR)
     agent.ts          -- Creates the agent with tools + system prompt
   issues/             -- Generated: detailed analysis files
   config.json         -- Your credentials (git-ignored)

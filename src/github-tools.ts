@@ -193,3 +193,152 @@ export function createPullRequestTool(owner: string, repo: string, octokit: Octo
     }
   );
 }
+
+/**
+ * Tool: List files in the repository
+ * Uses three GitHub API calls:
+ *   1. octokit.rest.git.getRef() -- get the commit SHA of the branch
+ *   2. octokit.rest.git.getCommit() -- get the tree SHA from the commit
+ *   3. octokit.rest.git.getTree() -- get the full file tree recursively
+ *
+ * Returns file paths and sizes. Supports optional path prefix filtering.
+ */
+export function createListRepoFilesTool(owner: string, repo: string, octokit: Octokit) {
+  return tool(
+    async ({ path = '', branch = 'main' }: { path?: string; branch?: string }) => {
+      try {
+        console.log(`\u{1F4C2} Listing files in ${owner}/${repo}${path ? ` under ${path}` : ''}...`);
+
+        // Step 1: Get the commit SHA of the branch
+        const { data: ref } = await octokit.rest.git.getRef({
+          owner,
+          repo,
+          ref: `heads/${branch}`,
+        });
+        const commitSha = ref.object.sha;
+
+        // Step 2: Get the tree SHA from the commit
+        const { data: commit } = await octokit.rest.git.getCommit({
+          owner,
+          repo,
+          commit_sha: commitSha,
+        });
+        const treeSha = commit.tree.sha;
+
+        // Step 3: Get the full tree recursively
+        const { data: tree } = await octokit.rest.git.getTree({
+          owner,
+          repo,
+          tree_sha: treeSha,
+          recursive: 'true',
+        });
+
+        // Filter to blobs (files only, not sub-trees) and apply path prefix
+        const prefix = path ? (path.endsWith('/') ? path : path + '/') : '';
+        const files = tree.tree
+          .filter((item) => item.type === 'blob')
+          .filter((item) => !prefix || item.path?.startsWith(prefix))
+          .map((item) => ({
+            path: item.path,
+            size: item.size,
+          }));
+
+        if (tree.truncated) {
+          return JSON.stringify({
+            files,
+            warning: 'Tree was truncated by GitHub API (repo has too many files). Results may be incomplete.',
+            total: files.length,
+          }, null, 2);
+        }
+
+        return JSON.stringify({ files, total: files.length }, null, 2);
+      } catch (error) {
+        return `Error listing files: ${error}`;
+      }
+    },
+    {
+      name: 'list_repo_files',
+      description: 'List all files in the repository. Returns file paths and sizes. Use this to understand the repo structure before reading specific files. Supports optional path prefix filtering (e.g., "src/" to list only source files).',
+      schema: z.object({
+        path: z.string().optional().default('').describe('Filter files by path prefix (e.g., "src/", "test/"). Empty string returns all files.'),
+        branch: z.string().optional().default('main').describe('Branch to list files from (default: main)'),
+      }),
+    }
+  );
+}
+
+/**
+ * Tool: Read a single file from the repository
+ * Uses octokit.rest.repos.getContent() to fetch file content.
+ * GitHub returns base64-encoded content which we decode to UTF-8 text.
+ *
+ * Note: GitHub's Content API has a 1MB file size limit. For larger files,
+ * the API returns a git_url that can be used with the Blobs API instead.
+ */
+export function createReadRepoFileTool(owner: string, repo: string, octokit: Octokit) {
+  return tool(
+    async ({ path, branch = 'main' }: { path: string; branch?: string }) => {
+      try {
+        console.log(`\u{1F4D6} Reading ${path} from ${owner}/${repo} (${branch})...`);
+
+        const { data } = await octokit.rest.repos.getContent({
+          owner,
+          repo,
+          path,
+          ref: branch,
+        });
+
+        // getContent can return a file, directory, symlink, or submodule.
+        // We only handle files (type === 'file' with content + encoding).
+        if (Array.isArray(data)) {
+          return `Error: '${path}' is a directory, not a file. Use list_repo_files to browse directories.`;
+        }
+
+        if (data.type !== 'file') {
+          return `Error: '${path}' is a ${data.type}, not a file.`;
+        }
+
+        if (!data.content) {
+          return `Error: '${path}' has no content (file may be too large for the Content API -- GitHub limit is 1MB).`;
+        }
+
+        // Decode base64 content to UTF-8 string
+        const fullContent = Buffer.from(data.content, 'base64').toString('utf-8');
+
+        // Truncate files over 500 lines to avoid flooding the LLM context
+        const MAX_LINES = 500;
+        const lines = fullContent.split('\n');
+        const truncated = lines.length > MAX_LINES;
+        const content = truncated
+          ? lines.slice(0, MAX_LINES).join('\n')
+          : fullContent;
+
+        const result: Record<string, unknown> = {
+          path: data.path,
+          size: data.size,
+          sha: data.sha,
+          content,
+        };
+
+        if (truncated) {
+          result.truncated = true;
+          result.total_lines = lines.length;
+          result.shown_lines = MAX_LINES;
+          result.note = `File has ${lines.length} lines. Only the first ${MAX_LINES} are shown. Use list_repo_files to find smaller, more targeted files.`;
+        }
+
+        return JSON.stringify(result, null, 2);
+      } catch (error) {
+        return `Error reading file '${path}': ${error}`;
+      }
+    },
+    {
+      name: 'read_repo_file',
+      description: 'Read the contents of a single file from the repository. Returns the file content as text. Files over 500 lines are truncated. Use list_repo_files first to find the correct file path. Limited to files under 1MB.',
+      schema: z.object({
+        path: z.string().describe('Full path to the file in the repo (e.g., "src/index.ts", "README.md")'),
+        branch: z.string().optional().default('main').describe('Branch to read from (default: main)'),
+      }),
+    }
+  );
+}

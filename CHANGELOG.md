@@ -1,5 +1,54 @@
 # Changelog
 
+> **Versioning plan:** Patch bumps per issue, minor bumps at phase milestones.
+> See LEARNING_LOG.md Entry 8 for the full dependency map and version targets.
+>
+> v0.2.0 = Phase 1 (Code Awareness) | v0.3.0 = Phase 2 (Safety) | v0.4.0 = Phase 3 (CLI/Tests)
+> v0.5.0 = Phase 4 (Intelligence) | v0.6.0 = Phase 5 (Resilience) | v0.7.0 = Phase 6 (Webhooks)
+> v0.8.0 = Phase 7 (Deployment) | v1.0.0 = Phase 8 (Reviewer Bot)
+
+---
+
+## v0.2.0 — 2026-02-08 — Phase 1 Complete: Code Awareness
+
+**Milestone:** The agent can now read actual source code, not just issue descriptions. Analysis quality jumps from guessing to code-aware.
+
+### Phase 1 Summary
+- Two new read-only tools give the agent full codebase visibility
+- `list_repo_files` traverses Git's object model (ref -> commit -> tree) to enumerate all files
+- `read_repo_file` uses the Content API to fetch and decode individual file contents
+- Together they enable the **browse-then-read** pattern: list files, identify relevant ones, read them
+- See LEARNING_LOG Entries 9-11 for the full teaching narrative and Critic review
+
+### Added (v0.1.2)
+- **`list_repo_files` tool** (Issue #1) — lists all files in the repository with path and size info
+- Path prefix filtering (e.g., `"src/"` to list only source files)
+- Branch parameter for listing files on non-default branches
+- Truncation warning when GitHub API truncates large repos
+
+### Added (v0.1.3)
+- **`read_repo_file` tool** (Issue #2) — reads a single file's contents from the repository
+- Decodes base64 content from GitHub API to UTF-8 text
+- Returns file path, size, SHA, and full content
+- Files over 500 lines are truncated with metadata (prevents LLM context flooding)
+- Handles edge cases: directories, symlinks, files over 1MB
+
+### Changed
+- System prompt updated to guide the agent to list and read relevant source files during analysis
+- Agent now has 6 custom GitHub tools (was 4)
+
+## v0.1.1 — 2026-02-08
+
+### Added
+- **`list_repo_files` tool** (Issue #1) — lists all files in the repository with path and size info
+- Path prefix filtering (e.g., `"src/"` to list only source files)
+- Branch parameter for listing files on non-default branches
+- Truncation warning when GitHub API truncates large repos
+
+### Changed
+- System prompt updated to guide the agent to use `list_repo_files` during analysis
+- Agent now has 5 custom GitHub tools (was 4)
+
 ## v0.1.1 — 2026-02-08
 
 ### Added

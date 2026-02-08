@@ -1342,3 +1342,715 @@ If the team wants to address these findings, the recommended order is:
 4. Add stderr logging (#9) and atomic writes (#8) -- these improve operational visibility
 
 ---
+
+## Entry 8: Dependency Map -- Why the 8 Phases Are Ordered This Way
+
+**Date:** 2026-02-08
+**Author:** Architect Agent
+**Builds on:** Entries 1-7
+
+### Purpose
+
+This entry maps the dependencies between all 8 phases of the ROADMAP and explains why they are ordered the way they are. Each phase teaches a specific set of patterns relevant to building autonomous agents. If you are learning agent architecture, this map tells you *what to learn in what order* and *why that order matters*.
+
+### The 8 phases at a glance
+
+| Phase | Name | Issues | Core pattern taught |
+|-------|------|--------|---------------------|
+| 1 | Code Awareness | #1, #2 | **Tool composition** -- giving the agent new capabilities by adding tools |
+| 2 | Safety & Idempotency | #5, #6, #7, #8, #9, #10, #11 | **Defensive agent design** -- bounding behavior so the agent is safe to run unattended |
+| 3 | CLI & Testing | #23, #24 | **Developer experience** -- testing and operating the agent outside of production |
+| 4 | Intelligence | #3, #4 | **Multi-agent architecture** -- LangGraph StateGraph, triage/analysis split |
+| 5 | Resilience | #17, #22 | **Error recovery** -- retry, backoff, graceful shutdown |
+| 6 | Webhook & Real-Time | #12, #13, #14, #18 | **Event-driven architecture** -- replacing polling with push-based processing |
+| 7 | Deployment | #19, #20, #21 | **Production infrastructure** -- Docker, identity, monitoring |
+| 8 | Reviewer Bot | #15, #16 | **Multi-bot pipeline** -- a second agent that reviews the first agent's output |
+
+### Why this order? The dependency chain
+
+```
+Phase 1: Code Awareness
+    |
+    v
+Phase 2: Safety & Idempotency
+    |
+    v
+Phase 3: CLI & Testing
+    |
+    v
+Phase 4: Intelligence ──────────────────────┐
+    |                                        |
+    v                                        |
+Phase 5: Resilience                          |
+    |                                        |
+    v                                        |
+Phase 6: Webhook & Real-Time                 |
+    |                                        |
+    v                                        |
+Phase 7: Deployment                          |
+    |                                        |
+    v                                        v
+Phase 8: Reviewer Bot (separate project, needs Phases 4+7)
+```
+
+Each arrow means: "The phase above must be complete (or mostly complete) before the phase below makes sense." Here is why for each transition.
+
+### Phase 1 -> Phase 2: You need tools before you can constrain them
+
+**Phase 1 (Code Awareness)** adds `list_repo_files` (#1) and `read_repo_file` (#2) -- two new tools that let the agent see the actual codebase, not just issue descriptions. This is **tool composition**: the same `tool()` factory pattern from Entry 1, applied to new capabilities.
+
+**Why Phase 2 depends on Phase 1:** Phase 2's safety features (max issues per run, duplicate prevention, circuit breakers) are about *constraining* how the agent uses its tools. You cannot meaningfully constrain an agent that only has one read-only tool. Once the agent has tools that create branches, post comments, and open PRs (v0.1.0) *and* read the codebase (Phase 1), the constraint problem becomes real -- the agent could spam comments, create hundreds of branches, or make overlapping PRs. Phase 2 is the answer to "what if the agent goes rogue?"
+
+**Issue-level dependencies within Phase 1:**
+- **#1 (list_repo_files)** and **#2 (read_repo_file)** are independent -- they can be implemented in parallel. Neither requires the other. But together they form a complete picture: #1 lets the agent see *what files exist*, #2 lets it *read a specific file*. The agent's typical workflow will be: list files -> find relevant files -> read them -> incorporate into analysis.
+
+### Phase 2 -> Phase 3: Safety first, then testing
+
+**Phase 2 (Safety & Idempotency)** adds seven protective features:
+
+| Issue | What it does | Why it matters |
+|-------|-------------|----------------|
+| #5 Max issues per run | Caps how many issues the agent processes per invocation | Prevents runaway API usage and LLM costs |
+| #8 Prevent duplicate comments | Checks for an existing bot comment before posting | Prevents comment spam (the hidden-marker pattern from Entry 7) |
+| #9 Prevent duplicate branches | Checks if a branch already exists before creating | Prevents "reference already exists" errors |
+| #10 Prevent duplicate PRs | Checks if an open PR already exists for the branch | Prevents PR spam |
+| #11 Track actions per issue | Records which steps completed for each issue | Enables crash recovery -- resume where you left off |
+| #6 Circuit breaker | Limits total tool calls per agent invocation | Prevents infinite loops where the agent keeps calling tools |
+| #7 Dry run mode | Runs the full pipeline but skips write operations | Enables safe testing without side effects |
+
+**Issue-level dependencies within Phase 2:**
+- **#5, #8, #9, #10** are independent -- each protects a different action
+- **#11** (action tracking) logically comes after #8, #9, #10 because it tracks the *completion* of those idempotent actions
+- **#6** (circuit breaker) is independent -- it operates at the agent framework level
+- **#7** (dry run) should come last -- it needs all the other tools to exist so it can wrap them
+
+**Why Phase 3 depends on Phase 2:** You cannot write meaningful tests for a bot that has no safety constraints. Phase 2 gives us deterministic, idempotent operations -- which are *testable*. Dry run mode (#7) is specifically designed for Phase 3's test infrastructure: tests run in dry-run mode so they never hit the real GitHub API.
+
+### Phase 3 -> Phase 4: Test infrastructure enables confident refactoring
+
+**Phase 3 (CLI & Testing)** adds:
+- **#24 CLI wrapper** -- `deepagents poll`, `deepagents analyze --issue 5`, `deepagents dry-run`, `deepagents status`
+- **#23 Test infrastructure** -- vitest setup, mocks for GitHub API and LLM, unit tests for core logic
+
+**The CLI pattern:** Every feature gets a CLI subcommand that uses the same core code as the cron/webhook mode. This means `src/index.ts` evolves into a library of functions that the CLI calls, not a monolithic script. The CLI is both a developer tool and a stepping stone to the webhook handler (Phase 6).
+
+**Why Phase 4 depends on Phase 3:** Phase 4 restructures the agent from a single ReAct loop into a two-phase pipeline (triage -> analysis). This is a significant refactor. Without test coverage from Phase 3, you are refactoring blind -- any regression goes unnoticed until a user discovers it. Tests make the Phase 4 refactor safe.
+
+### Phase 4: The intelligence leap -- LangGraph StateGraph
+
+**Phase 4 (Intelligence)** is the biggest conceptual jump in the project:
+- **#3 Triage agent** -- a lightweight, fast agent that classifies and scopes each issue
+- **#4 Analysis agent** -- a thorough, expensive agent that produces deep code-aware analysis
+
+**The LangGraph pattern:** Instead of one agent doing everything, we use a **StateGraph** -- a directed graph where nodes are agent steps and edges are transitions. The graph looks like:
+
+```
+[Fetch Issues] --> [Triage Agent] --> [Analysis Agent] --> [Post Results]
+                        |                                       ^
+                        |-- (skip low-priority) ------> [Log & Skip]
+```
+
+**Why this teaches you something new:**
+- **ReAct** (Entries 1-3): one agent, one loop, decides everything
+- **StateGraph** (Phase 4): multiple agents, explicit transitions, each step has a defined role
+
+The triage agent can use a cheap/fast model (Haiku, GPT-3.5). The analysis agent uses an expensive/thorough model (Opus, GPT-4). This is the **model routing** pattern -- use the right model for the right job.
+
+**Why Phase 4 comes after Phase 3, not earlier:** The two-agent architecture is more complex to debug. Having the CLI (`deepagents analyze --issue 5`) and test infrastructure means you can test each agent independently before wiring them together in the StateGraph.
+
+### Phase 5: Making it reliable
+
+**Phase 5 (Resilience)** adds:
+- **#17 Error handling with retry and backoff** -- exponential backoff for transient API failures (rate limits, network timeouts)
+- **#22 Graceful shutdown** -- SIGTERM handling so container stops do not lose work
+
+**The retry pattern:** Wrap tool API calls in a retry loop with exponential backoff: wait 1s, then 2s, then 4s, up to a maximum. This handles GitHub API rate limits (403 with `Retry-After` header) and transient network errors without manual intervention.
+
+**The graceful shutdown pattern:** When the process receives SIGTERM (from Docker, systemd, or Ctrl+C), it finishes the current issue, saves poll state, and then exits. Without this, killing the process mid-run leaves `last_poll.json` in an inconsistent state (Entry 7, Finding 8).
+
+**Why Phase 5 depends on Phase 4:** Retry logic applies to the multi-step pipeline from Phase 4. If the triage agent fails mid-run, we need to know whether to retry triage or skip to analysis. The StateGraph makes this explicit -- each node can have its own retry policy. Without the StateGraph, retry logic would be ad-hoc.
+
+### Phase 6: From polling to events
+
+**Phase 6 (Webhook & Real-Time)** replaces the cron-based polling with real-time event processing:
+- **#12 HTTP webhook listener** -- an Express/Fastify server that receives GitHub webhook payloads
+- **#13 Handle `issues.opened` event** -- trigger analysis when a new issue is created
+- **#14 Handle `pull_request.opened` event** -- trigger analysis when a PR is opened
+- **#18 Persistent job queue (PostgreSQL)** -- queue events and process them one at a time
+
+**The event-driven pattern:** Instead of asking GitHub "any new issues?" every 15 minutes, GitHub *tells us* when something happens. This is push vs. pull. Benefits: instant response, no polling waste, no timing edge cases (Entry 3).
+
+**Why the job queue:** Webhooks arrive in bursts. If 10 issues are opened simultaneously, we do not want 10 parallel agent runs (cost, rate limits, race conditions). A PostgreSQL job queue serializes processing: events are enqueued immediately, then dequeued and processed one at a time.
+
+**Why Phase 6 depends on Phase 5:** The webhook listener must handle failures gracefully. If the agent crashes mid-analysis, the job should be retried (Phase 5's retry logic). If the server receives SIGTERM, in-flight jobs should be re-queued (Phase 5's graceful shutdown). Without resilience, the webhook system would lose events on every failure.
+
+### Phase 7: Production deployment
+
+**Phase 7 (Deployment)** makes it production-ready:
+- **#21 Docker + Caddy** -- three-container stack: Caddy (reverse proxy + TLS), Node (the bot), PostgreSQL (job queue)
+- **#20 Health check endpoint** -- `/health` endpoint that returns status (useful for Docker healthchecks and monitoring)
+- **#19 GitHub App migration** -- replace Personal Access Token with a GitHub App (proper identity, fine-grained permissions, installation-level auth)
+
+**Why Docker + Caddy:** Caddy handles TLS certificates automatically (Let's Encrypt). This is required for webhooks -- GitHub sends webhook payloads over HTTPS. The three-container architecture separates concerns: Caddy handles networking, Node handles logic, PostgreSQL handles state.
+
+**Why GitHub App:** A Personal Access Token is tied to a human user. A GitHub App has its own identity (shows up as "bot" in comments), can be installed on specific repos, and has fine-grained permissions. This is the production-appropriate way to authenticate a bot.
+
+**Why Phase 7 depends on Phase 6:** The Docker stack exists to host the webhook listener from Phase 6. Without webhooks, there is nothing to deploy -- the cron-based system runs on any machine with `crontab`.
+
+### Phase 8: The second bot
+
+**Phase 8 (Reviewer Bot)** is a separate project:
+- **#15 PR review agent** -- a second agent that reads draft PRs and posts review comments
+- **#16 `submit_pr_review` tool** -- wraps `octokit.rest.pulls.createReview()`
+
+**The multi-bot pipeline:**
+
+```
+Issue opened
+  -> Analyzer bot (this project)
+      -> Comments on issue
+      -> Creates draft PR
+          -> Reviewer bot (Phase 8, separate project)
+              -> Posts PR review
+                  -> Human merges (or not)
+```
+
+**Why this is a separate project:** The reviewer bot has a different concern (code review vs. issue analysis), potentially different tools, and could use a different model. Keeping it separate demonstrates the **micro-agent** pattern -- small, focused agents that communicate through shared infrastructure (GitHub).
+
+**Why Phase 8 depends on Phases 4 and 7:** The reviewer bot needs draft PRs to review (created by Phase 4's analysis agent) and a deployment platform to run on (Phase 7's Docker stack). It also needs the `pull_request.opened` webhook event from Phase 6 to trigger automatically.
+
+### Issue dependency graph (all 24 issues)
+
+```
+Phase 1 (Code Awareness):
+  #1 list_repo_files ─┐
+  #2 read_repo_file  ─┤ (independent, implement in parallel)
+                      │
+Phase 2 (Safety):     v
+  #5  max issues ─────┐
+  #8  dup comments ───┤
+  #9  dup branches ───┤── (independent, implement in any order)
+  #10 dup PRs ────────┤
+  #6  circuit breaker ┤
+                      │
+  #11 action tracking ┤── (depends on #8, #9, #10)
+  #7  dry run ────────┘── (depends on all above)
+                      │
+Phase 3 (CLI/Test):   v
+  #23 test infra ─────┤── (independent)
+  #24 CLI wrapper ────┘── (independent, but benefits from #23)
+                      │
+Phase 4 (Intelligence): v
+  #3 triage agent ────┐
+                      v
+  #4 analysis agent ──┘── (#4 depends on #3: triage runs first)
+                      │
+Phase 5 (Resilience): v
+  #17 retry/backoff ──┤── (independent)
+  #22 graceful shutdown┘── (independent)
+                      │
+Phase 6 (Webhooks):   v
+  #12 HTTP listener ──┐
+                      v
+  #13 issues.opened ──┤── (depends on #12)
+  #14 PR.opened ──────┤── (depends on #12)
+                      v
+  #18 job queue ──────┘── (depends on #12, #13, #14)
+                      │
+Phase 7 (Deploy):     v
+  #21 Docker+Caddy ───┐
+  #20 health check ───┤── (#20 depends on #21 for container context)
+  #19 GitHub App ─────┘── (independent, can be done anytime)
+                      │
+Phase 8 (Reviewer):   v
+  #15 PR review agent ┐
+  #16 submit_pr_review┘── (#16 is the tool for #15)
+```
+
+### What each phase teaches about agent architecture
+
+| Phase | Agent architecture concept | Real-world parallel |
+|-------|---------------------------|---------------------|
+| 1 | **Tool composition** -- adding capabilities by adding tools | Giving an employee new software access |
+| 2 | **Guardrails** -- bounding agent behavior programmatically | Setting spending limits on a corporate card |
+| 3 | **Observability** -- CLI/tests let you inspect what the agent does | QA and staging environments |
+| 4 | **Multi-agent orchestration** -- LangGraph StateGraph | Assembly line with specialized stations |
+| 5 | **Fault tolerance** -- retry, recovery, graceful degradation | Circuit breakers in electrical systems |
+| 6 | **Event-driven processing** -- webhook + job queue | Notification systems, message brokers |
+| 7 | **Deployment** -- containers, identity, monitoring | DevOps, infrastructure-as-code |
+| 8 | **Agent-to-agent communication** -- one bot reviews another | Peer review, separation of duties |
+
+### Versioning plan
+
+The project is currently at **v0.1.1** (multi-provider LLM support). Going forward:
+
+- **Patch bumps** (v0.1.2, v0.1.3, ...) for each issue completed within a phase
+- **Minor bumps** at phase milestones:
+  - v0.2.0 -- Phase 1 complete (code-aware agent)
+  - v0.3.0 -- Phase 2 complete (safe to run unattended)
+  - v0.4.0 -- Phase 3 complete (CLI + tests)
+  - v0.5.0 -- Phase 4 complete (two-agent pipeline)
+  - v0.6.0 -- Phase 5 complete (resilient operations)
+  - v0.7.0 -- Phase 6 complete (real-time webhooks)
+  - v0.8.0 -- Phase 7 complete (production deployment)
+  - v1.0.0 -- Phase 8 complete (full pipeline with reviewer bot)
+
+Each patch bump gets a CHANGELOG entry. Each minor bump is a milestone moment that warrants a LEARNING_LOG summary entry reflecting on what was learned in that phase.
+
+### Connection to next entries
+
+The Builder agents will now implement Phase 1:
+- Entry 9: Implementing `list_repo_files` tool (#1) -- extends the tool composition pattern from Entry 1
+- Entry 10: Implementing `read_repo_file` tool (#2) -- same pattern, different API calls
+
+After Phase 1, we will write a Phase 1 retrospective entry before moving to Phase 2.
+
+---
+
+## Entry 9: Implementing `list_repo_files` Tool (Issue #1)
+
+**Date:** 2026-02-08
+**Author:** Builder Agent
+**Builds on:** Entries 1, 2, 8
+**Issue:** #1 — Add `list_repo_files` tool (repo map)
+**Version:** v0.1.2
+
+### What just happened?
+
+We added a `list_repo_files` tool to `src/github-tools.ts` and wired it into the agent in `src/agent.ts`. The agent can now see the repository's file structure -- a prerequisite for code-aware analysis.
+
+### The pattern: Multi-step API calls to traverse Git's object model
+
+This tool requires **three** sequential GitHub API calls, making it the most API-intensive tool in the project so far. Understanding *why* three calls are needed teaches you how Git stores data internally.
+
+```
+Branch name ("main")
+    |
+    v
+[git.getRef] --> commit SHA
+    |
+    v
+[git.getCommit] --> tree SHA
+    |
+    v
+[git.getTree(recursive)] --> list of all files
+```
+
+**Why three calls?** Git stores data as a hierarchy of objects:
+1. A **ref** (branch) points to a **commit**
+2. A **commit** points to a **tree** (the root directory)
+3. A **tree** contains **blobs** (files) and nested **trees** (subdirectories)
+
+To list files, we need the tree SHA. To get the tree SHA, we need the commit. To get the commit, we start from the branch ref. Each step resolves one level of Git's indirection.
+
+**Contrast with `create_branch`:** That tool (Entry 6) uses only two calls (getRef + createRef) because creating a branch only needs the commit SHA, not the tree. The difference shows how different operations need different depths of the Git object graph.
+
+### The `recursive: 'true'` parameter
+
+`octokit.rest.git.getTree()` accepts a `recursive` parameter. Without it, you only get the top-level directory entries (including sub-tree objects). With `recursive: 'true'`, GitHub flattens the entire tree into a single list of all files at all depths. This saves us from having to manually traverse sub-trees.
+
+**The catch:** GitHub truncates recursive trees at around 100,000 entries. For enormous monorepos, the result may be incomplete. We detect this with `tree.truncated` and include a warning in the response. For normal repositories, this is never hit.
+
+```typescript
+if (tree.truncated) {
+  return JSON.stringify({
+    files,
+    warning: 'Tree was truncated by GitHub API (repo has too many files). Results may be incomplete.',
+    total: files.length,
+  }, null, 2);
+}
+```
+
+### Path prefix filtering
+
+The tool accepts an optional `path` parameter (e.g., `"src/"`) that filters results client-side. Why not server-side? The GitHub Tree API does not support filtering -- it returns the entire tree. We filter after fetching.
+
+```typescript
+const prefix = path ? (path.endsWith('/') ? path : path + '/') : '';
+const files = tree.tree
+  .filter((item) => item.type === 'blob')
+  .filter((item) => !prefix || item.path?.startsWith(prefix))
+```
+
+**Design choice:** We normalize the prefix to always end with `/`. This prevents `"src"` from matching `"srcutils/helper.ts"`. A small detail, but important for correctness.
+
+**Alternative considered:** Fetching only the sub-tree for the given path (using `git.getTree` with the sub-tree's SHA). This would be more efficient for deeply nested paths but adds another API call to resolve the sub-tree SHA, and complicates the code for a marginal performance gain. For a learning project, simplicity wins.
+
+### Why this tool matters for the agent
+
+Before this tool, the agent analyzed issues purely from their title and description. It was guessing about code structure. Now the agent can:
+1. Call `list_repo_files()` to see the complete file tree
+2. Identify which files are likely relevant to the issue
+3. Reference specific file paths in its analysis and PR descriptions
+
+This is the first half of **code awareness** (Phase 1). The second half -- `read_repo_file` (Entry 10) -- will let the agent read actual file contents. Together, they transform the agent from "reading the summary" to "reading the code."
+
+### Wiring into the agent
+
+The tool is added to the imports in `agent.ts`, instantiated with the shared Octokit client, and included in the tools array. The system prompt is updated to tell the agent to use `list_repo_files` during the analysis step:
+
+```
+1. ANALYZE the issue:
+   - ...
+   - Use list_repo_files to see the repo structure and identify relevant files
+   - ...
+```
+
+This prompt change is subtle but important. Without it, the agent might never discover or use the tool. The system prompt is the agent's playbook -- new capabilities must be announced there.
+
+### The "aha moment"
+
+**Git's object model is a content-addressable tree, and every API that touches Git operates on this tree.** The branch -> commit -> tree -> blob chain is not an API design quirk -- it mirrors how Git itself stores data. Once you internalize this model, every Git API call makes sense: you are always navigating the same tree structure, just starting from different points.
+
+This is why `create_branch` needs two calls (branch -> commit -> create new branch pointing to same commit), and `list_repo_files` needs three calls (branch -> commit -> tree -> enumerate blobs). The number of API calls directly corresponds to how deep into the object graph you need to go.
+
+### Connection to next entry
+
+Entry 10 will implement `read_repo_file` (#2) -- the companion tool that reads a specific file's content. Together with `list_repo_files`, this completes Phase 1 (Code Awareness). The agent will be able to navigate and read the codebase, making its analysis genuinely code-aware.
+
+---
+
+## Entry 10: Implementing `read_repo_file` Tool (Issue #2)
+
+**Date:** 2026-02-08
+**Author:** Builder Agent
+**Builds on:** Entries 1, 2, 8, 9
+**Issue:** #2 -- Add `read_repo_file` tool (code reading)
+**Version:** v0.1.3
+
+### What just happened?
+
+We added a `read_repo_file` tool to `src/github-tools.ts` and wired it into the agent. Together with `list_repo_files` (Entry 9), this completes Phase 1 -- the agent is now **code-aware**. It can list the repository's file structure, then read individual files to understand the actual code before analyzing issues.
+
+### The pattern: Content API with base64 decoding
+
+Unlike `list_repo_files` (which traverses Git's object model via the Tree API), `read_repo_file` uses GitHub's higher-level **Content API** (`repos.getContent`). This is a convenience endpoint that combines the steps of resolving a path to a blob and fetching the blob's content.
+
+```typescript
+const { data } = await octokit.rest.repos.getContent({
+  owner, repo, path, ref: branch,
+});
+```
+
+**Why the Content API instead of the Blob API?** The Blob API (`git.getBlob`) requires the blob's SHA. To get the SHA, you would need to traverse the tree (like `list_repo_files` does), find the blob entry for the given path, and extract its SHA. The Content API accepts a human-readable file path and does the lookup internally. One API call instead of three.
+
+**The trade-off:** The Content API has a **1MB file size limit**. Files larger than 1MB return metadata but no content. The Blob API does not have this limit (it can fetch up to 100MB). For this learning project, 1MB is sufficient -- most source files are well under this limit. A production tool might fall back to the Blob API for large files.
+
+### Line truncation: protecting LLM context
+
+Even under 1MB, a file can be thousands of lines long. Sending all of that to the LLM wastes context tokens and can push important information out of the context window. We truncate files over 500 lines:
+
+```typescript
+const MAX_LINES = 500;
+const lines = fullContent.split('\n');
+const truncated = lines.length > MAX_LINES;
+const content = truncated ? lines.slice(0, MAX_LINES).join('\n') : fullContent;
+```
+
+When truncation occurs, the response includes metadata telling the agent what happened:
+
+```json
+{ "truncated": true, "total_lines": 1200, "shown_lines": 500,
+  "note": "File has 1200 lines. Only the first 500 are shown." }
+```
+
+**Why 500 lines?** It is a practical middle ground. Most source files in well-structured projects are under 500 lines. Files over 500 lines are often generated code, large configs, or modules that should be split. The agent can still understand the file's structure from the first 500 lines.
+
+**Why truncate in the tool, not in the prompt?** The prompt could say "only read the first 500 lines" but the LLM might ignore that. Truncating in code guarantees the limit is enforced -- this follows the Phase 2 principle of "constrain in code, not in prompts" (Entry 8).
+
+### Base64 decoding
+
+GitHub returns file content as a base64-encoded string. This is because the API response is JSON, and JSON cannot safely contain binary data or certain control characters. Base64 encoding ensures the content is valid JSON text regardless of what the file contains.
+
+```typescript
+// Decode base64 content to UTF-8 string
+const content = Buffer.from(data.content, 'base64').toString('utf-8');
+```
+
+**Why `Buffer.from` and not `atob`?** In Node.js, `Buffer.from(str, 'base64')` is the standard way to decode base64. The `atob` function exists in browsers but was only added to Node.js in v16 and handles Unicode differently. `Buffer` is more reliable for server-side base64 work.
+
+### Handling the Content API's union return type
+
+`repos.getContent` can return four different things depending on what `path` points to:
+
+| Path points to | Return type | Our response |
+|----------------|-------------|--------------|
+| A file | Object with `content` and `encoding` | Decode and return content |
+| A directory | Array of file entries | Return error: "use list_repo_files" |
+| A symlink | Object with `type: 'symlink'` | Return error: not a file |
+| A submodule | Object with `type: 'submodule'` | Return error: not a file |
+
+```typescript
+if (Array.isArray(data)) {
+  return `Error: '${path}' is a directory, not a file. Use list_repo_files to browse directories.`;
+}
+if (data.type !== 'file') {
+  return `Error: '${path}' is a ${data.type}, not a file.`;
+}
+```
+
+**Why check `Array.isArray` first?** The directory case returns an array, while the file/symlink/submodule cases return an object. Checking for the array distinguishes directories from everything else. Then we check `data.type` to handle non-file objects.
+
+**The error messages guide the agent.** Notice that the directory error says "Use list_repo_files to browse directories." This teaches the LLM the correct tool to use, reducing the chance it retries `read_repo_file` with the same path.
+
+### How `list_repo_files` and `read_repo_file` work together
+
+These two tools form a **browse-then-read** pattern:
+
+```
+Agent's mental model:
+  1. "What files does this repo have?" --> list_repo_files()
+  2. "Let me look at the relevant file"  --> read_repo_file("src/index.ts")
+  3. "Now I understand the code"         --> code-aware analysis
+```
+
+This mirrors how a human developer works: you open the file explorer, find the file, then open it. The system prompt guides the agent to follow this pattern:
+
+```
+1. ANALYZE the issue:
+   - ...
+   - Use list_repo_files to see the repo structure and identify relevant files
+   - Use read_repo_file to read the source code of files related to the issue
+   - ...
+   - Think about what a fix would involve based on actual code
+```
+
+### What changes from "guessing" to "code-aware"
+
+Before Phase 1, the agent's analysis looked like:
+> "Based on the issue description, this bug is probably in the authentication module. The fix would likely involve changing the token validation logic."
+
+After Phase 1, the analysis can look like:
+> "I read `src/auth.ts` (lines 42-58) and found that `validateToken()` does not check for expired tokens. The fix involves adding an expiry check after the signature verification on line 47."
+
+This is the difference between a summary and an analysis. The agent now has evidence.
+
+### The "aha moment"
+
+**The Content API is a convenience wrapper, not a fundamental primitive.** Every operation the Content API does (resolve path to blob, fetch blob content, decode) can be done manually with the lower-level Git APIs we used in `list_repo_files`. The Content API bundles them into one call with a friendlier interface.
+
+This is a common pattern in APIs: low-level primitives give you maximum flexibility (Git Tree/Blob APIs), while high-level convenience endpoints handle common cases more easily (Content API). Know both layers -- use the convenience API for simple cases, fall back to primitives when you need more control.
+
+### Phase 1 complete
+
+With `list_repo_files` (v0.1.2) and `read_repo_file` (v0.1.3), Phase 1 is done. The agent now has six custom tools:
+
+| Tool | Entry | API Pattern |
+|------|-------|-------------|
+| `fetch_github_issues` | Entry 1 | Single API call |
+| `comment_on_issue` | Entry 5 | Single API call |
+| `create_branch` | Entry 6 | Two sequential API calls |
+| `create_pull_request` | Entry 6 | Single API call |
+| `list_repo_files` | Entry 9 | Three sequential API calls |
+| `read_repo_file` | Entry 10 | Single API call (convenience) |
+
+Each tool added complexity in a different dimension: more API calls, different return types, different error modes. Together they show the full spectrum of the tool composition pattern.
+
+### Connection to next entries
+
+With Phase 1 complete, the Critic will review both tools against the guiding principles (Task #4). After that review, Phase 2 (Safety & Idempotency) begins -- adding guardrails so the agent can run unattended without causing problems.
+
+---
+
+## Entry 11: Critic's Phase 1 Review -- Code Awareness Tools, Edge Cases, and Version Bump
+
+**Date:** 2026-02-08
+**Author:** Critic Agent
+**Reviews:** Entries 8, 9, 10 (Architect dependency map + Builder Phase 1 implementations)
+**Files reviewed:** `src/github-tools.ts` (lines 197-327), `src/agent.ts`, `CHANGELOG.md`, `README.md`, `package.json`
+
+### Purpose of this entry
+
+This is the Phase 1 gate review. Entry 7 reviewed the v0.1.0 base implementation. This entry reviews the Phase 1 additions (`list_repo_files` and `read_repo_file`) against the project's guiding principles, pressure-tests edge cases, evaluates teaching notes, and makes a version bump recommendation.
+
+---
+
+### Guiding principles check
+
+The ROADMAP lists six guiding principles. Here is how Phase 1 measures up:
+
+| Principle | Verdict | Notes |
+|---|---|---|
+| 1. Learning first | Pass | Entries 9-10 explain Git's object model, base64 encoding, and Content vs. Blob API trade-offs. Good teaching value. |
+| 2. Incremental | Pass | Two tools added, each with its own patch bump (v0.1.2, v0.1.3). No existing code was broken. |
+| 3. Simple file structure | Pass | Both tools live in `github-tools.ts` alongside the existing four tools. No new files created. |
+| 4. CLI as the wrapper | N/A | Phase 3 concern. No CLI exists yet. |
+| 5. Humans decide | Pass | Neither tool takes any write action. Both are read-only. The agent reads code but never modifies it. |
+| 6. GitHub as the event bus | Pass | Both tools use GitHub's native API (Git Tree, Content API). No custom infrastructure. |
+
+**Overall:** Phase 1 is well-aligned with all applicable guiding principles.
+
+---
+
+### Finding 1: `list_repo_files` returns the entire tree to the LLM -- token cost risk
+
+**File:** `src/github-tools.ts:238-244`
+
+**What happens:** The tool fetches the full recursive tree and sends every file path + size to the LLM as JSON. For a small learning repo (20-50 files), this is fine. For a real project (thousands of files), the JSON response could be 50-100KB of text, consuming a significant portion of the LLM's context window.
+
+**What could go wrong at scale:**
+- A repo with 5,000 files generates ~200KB of JSON. At ~4 chars per token, that is ~50,000 tokens. Claude's context can handle this, but it consumes expensive input tokens on *every issue analyzed*.
+- The path prefix filter helps (`path: "src/"`) but depends on the LLM choosing to use it. The system prompt does not tell the agent to filter by path -- it just says "use list_repo_files to see the repo structure."
+
+**The learning moment:** Tool responses are LLM input. Every byte of a tool response costs tokens. When designing tools for LLM agents, consider: "What is the maximum possible size of this response, and is the LLM actually going to use all of it?"
+
+**Concrete improvement:** Add a `max_files` parameter (defaulting to, say, 200) that truncates the result with a warning. And update the system prompt to suggest using path filtering for large repos.
+
+**Impact:** Low for this learning project (small repos). High if pointed at a real production repo.
+**Effort:** Small -- one schema parameter, one filter, one prompt line.
+
+---
+
+### Finding 2: `read_repo_file` sends raw file content to the LLM -- no size guard
+
+**File:** `src/github-tools.ts:306-313`
+
+**What happens:** The tool decodes the full file content and returns it inside a JSON object. The 1MB GitHub API limit is mentioned in the docstring and handled in the error case (line 301-303), but files *under* 1MB are returned in full.
+
+**What could go wrong:**
+- A 500KB minified JavaScript file or a 300KB CSV would be sent to the LLM verbatim. The LLM cannot usefully analyze a minified file, so those tokens are wasted.
+- The agent might call `read_repo_file` on every file in the repo, one by one. Without a guard, a multi-file reading spree on moderately-sized files could consume 100K+ tokens.
+
+**The learning moment:** This is directly related to Finding 1 but on a per-file basis. Both tools need to consider: "Is the response size proportional to its usefulness?"
+
+**Concrete improvement:** Truncate content at a sensible limit (e.g., 50KB / ~12,000 tokens) and return a warning when truncated.
+
+**Impact:** Medium -- one large file read can dominate the context window.
+**Effort:** Small -- ~8 lines.
+
+---
+
+### Finding 3: Binary files decoded as UTF-8 produce garbage
+
+**File:** `src/github-tools.ts:306` -- `Buffer.from(data.content, 'base64').toString('utf-8')`
+
+**What happens:** If the agent calls `read_repo_file("logo.png")`, the base64 content is decoded as UTF-8 text. The result is garbage characters that consume tokens and confuse the LLM.
+
+**Why the agent might do this:** The `list_repo_files` tool returns *all* blobs, including images, fonts, and compiled files. The LLM sees `logo.png` in the file list and might read it if the issue mentions the logo.
+
+**The fix:** Check if the file is likely binary before decoding. A simple heuristic: check the file extension against a known list of binary extensions and return a descriptive message like `"(binary file -- content not shown)"` instead.
+
+**Impact:** Low -- the LLM typically does not read binary files, but there is no guardrail if it does.
+**Effort:** Small -- ~6 lines.
+
+---
+
+### Finding 4: Empty repositories cause unhandled 404
+
+**File:** `src/github-tools.ts:213-217` -- `git.getRef` in `list_repo_files`
+
+**What happens:** If `list_repo_files` is called on a repository that is completely empty (no commits, no branches), the `git.getRef` call returns a 404. The try/catch returns a generic error string.
+
+**Why it matters:** A user following the README might create a fresh empty repo and see a confusing error.
+
+**Concrete improvement:** Detect 404 in the catch block and return a targeted message like "Branch 'main' not found. The repository may be empty or the branch name may be incorrect."
+
+**Impact:** Low -- edge case for new users.
+**Effort:** Trivial -- 3 lines.
+
+---
+
+### Finding 5: Three API calls per `list_repo_files` invocation -- rate limit awareness
+
+**File:** `src/github-tools.ts:213-234`
+
+**What is happening:** The tool calls `getRef` -> `getCommit` -> `getTree` every time. If the agent calls `list_repo_files` multiple times per issue (once unfiltered, then filtered by `"src/"`, then by `"test/"`), that is 9 API calls just for file listing.
+
+**Not a recommended fix for now.** Caching the tree SHA would reduce subsequent calls from 3 to 1, but adds complexity (cache invalidation, closure state). GitHub's rate limit is 5,000 requests/hour for authenticated requests, so this is not a bottleneck for a learning project. Mentioning it for awareness because Phase 2 will add more tools that make API calls.
+
+**Impact:** Low.
+**Effort:** Medium.
+
+---
+
+### Finding 6: `list_repo_files` and `create_branch` share `getRef` pattern -- teaching opportunity
+
+**File:** `src/github-tools.ts:118-122` (create_branch) and `src/github-tools.ts:213-218` (list_repo_files)
+
+Both tools start with the exact same `getRef` call to resolve a branch name to a commit SHA. This is not a bug -- four lines of duplication in a 327-line file is not worth abstracting. But Entry 9 could strengthen the teaching by noting: "Notice this is the same `git.getRef()` call as `create_branch` (Entry 6). Both operations begin by resolving a branch name to a commit SHA -- the first step in navigating Git's object model."
+
+**Impact:** None (informational).
+
+---
+
+### Teaching notes accuracy check (Entries 8, 9, 10)
+
+| Claim | Accurate? | Notes |
+|---|---|---|
+| Entry 8: "currently at v0.1.1" | Stale | Project is now at v0.1.3. The version plan itself is correct. Minor inconsistency. |
+| Entry 9: recursive trees truncate at ~100,000 entries | Correct | GitHub documents this. Code handles it with `tree.truncated`. |
+| Entry 9: client-side filtering (Tree API has no server-side filter) | Correct | |
+| Entry 9: normalizing prefix to always end with `/` | Correct | `github-tools.ts:237` does this. |
+| Entry 10: Content API 1MB limit | Correct | Code checks for missing content (line 301). |
+| Entry 10: `Buffer.from` vs `atob` | Correct | |
+| Entry 10: Content API union return type (4 cases) | Correct | Code checks array (directory), type !== 'file', and missing content. |
+| Entry 10: browse-then-read pattern | Correct and well-explained | Good parallel to human developer workflow. |
+
+**Overall:** Teaching notes are accurate. Entry 9's Git object model explanation and Entry 10's Content API union type handling are particularly clear.
+
+---
+
+### Version bump assessment: Should 0.1.3 become 0.2.0?
+
+**The case for 0.2.0:**
+- Phase 1 is complete. The ROADMAP says Phase 1 is "Code Awareness" with issues #1 and #2, both now implemented.
+- Entry 8's versioning plan explicitly maps v0.2.0 to Phase 1 completion.
+- The CHANGELOG header echoes this: "v0.2.0 = Phase 1 (Code Awareness)."
+- This is a meaningful capability milestone: the agent went from guessing about code to reading actual source files.
+
+**The case against 0.2.0:**
+- None. The project's own versioning plan says v0.2.0 = Phase 1 complete. Phase 1 is complete.
+
+**Recommendation:** Bump to v0.2.0. This is not a "bigger than a patch" challenge -- the Architect's versioning plan in Entry 8 explicitly reserves v0.2.0 for this moment. Shipping Phase 1 as v0.1.3 contradicts the documented plan.
+
+---
+
+### Comparison with Entry 7 findings: what is still open?
+
+| Entry 7 finding | Status | Notes |
+|---|---|---|
+| #1, #13 Path resolution (relative `./`) | **Still open** | Affects config.ts, index.ts |
+| #2 Config type safety (JSON.parse -> any) | **Still open** | |
+| #3 API key in error message | **Fixed** | model.ts refactor resolved this |
+| #4 process.exit in config.ts | **Still open** | |
+| #5 Labels map type guard | **Still open** | github-tools.ts:48 |
+| #6 Cron overlap protection | **Still open** | Addressed by Phase 2 |
+| #7 Comment idempotency | **Still open** | Addressed by Phase 2 (ROADMAP #8) |
+| #8 Atomic poll state writes | **Still open** | |
+| #9 stderr logging in tool catch blocks | **Still open** | |
+| #10 Bake `since` into tool | **Still open** | |
+| #11 Issue number extraction fragility | **Still open** | |
+| #12 set -e edge case | **Still open** | Info only |
+
+12 of 13 findings remain open. Findings #6 and #7 are directly addressed by Phase 2 tasks.
+
+---
+
+### Overall assessment
+
+**What the team did well:**
+- Both tools are correctly implemented. `list_repo_files` properly traverses Git's object model (ref -> commit -> tree). `read_repo_file` correctly handles the Content API's union return type.
+- The truncation warning for large trees (`tree.truncated`) shows awareness of API limits.
+- Error messages in `read_repo_file` guide the LLM to the correct tool ("Use list_repo_files to browse directories").
+- The system prompt was updated with the correct ordering (list first, then read).
+- Teaching notes are accurate and well-connected to previous entries.
+- README updated with new workflow steps and example output.
+
+**What could be improved:**
+- Token cost awareness is the main gap. Both tools return unbounded text to the LLM. Response size limits would improve cost and reliability.
+- Binary file handling is missing.
+- Version should be bumped to v0.2.0 per the project's own versioning plan.
+
+**The learning takeaway:** Phase 1 demonstrates **tool composition** cleanly -- two new read-only tools added without changing existing code. The deeper lesson is about *response design*: a tool's return value is LLM input, and its size directly affects cost and quality. Designing tools for LLM agents requires thinking about both the *action* (what the tool does) and the *observation* (what the LLM receives back).
+
+### Connection to next work
+
+Phase 2 (Safety & Idempotency) begins after this review. Key items that Phase 2 addresses:
+- Comment idempotency (Entry 7 #7 -> ROADMAP #8)
+- Duplicate branch prevention (ROADMAP #9)
+- Duplicate PR prevention (ROADMAP #10)
+- Max issues per run (ROADMAP #5) -- also addresses token cost concerns from this entry
+
+Response size limits from Findings #1 and #2 could be addressed as quick patches before Phase 2 or folded into Phase 2's "bounded resource usage" theme.
+
+---
