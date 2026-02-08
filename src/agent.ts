@@ -17,6 +17,7 @@ import {
   ToolCallCounter,
   wrapWithCircuitBreaker,
 } from './github-tools.js';
+import { wrapWithLogging } from './logger.js';
 
 /**
  * Create the Deep Agent with GitHub integration
@@ -41,8 +42,8 @@ export function createDeepAgentWithGitHub(config: Config, options: { maxIssues?:
   let commitFileTool = options.dryRun ? createDryRunCreateOrUpdateFileTool() : createOrUpdateFileTool(owner, repo, octokit);
 
   // Circuit breaker: wrap all tools with a shared call counter
-  if (options.maxToolCalls) {
-    const counter = new ToolCallCounter(options.maxToolCalls);
+  const counter = options.maxToolCalls ? new ToolCallCounter(options.maxToolCalls) : undefined;
+  if (counter) {
     githubIssuesTool = wrapWithCircuitBreaker(githubIssuesTool, counter);
     listFilesTool = wrapWithCircuitBreaker(listFilesTool, counter);
     readFileTool = wrapWithCircuitBreaker(readFileTool, counter);
@@ -51,6 +52,15 @@ export function createDeepAgentWithGitHub(config: Config, options: { maxIssues?:
     prTool = wrapWithCircuitBreaker(prTool, counter);
     commitFileTool = wrapWithCircuitBreaker(commitFileTool, counter);
   }
+
+  // Structured logging: wrap all tools (outermost layer, logs even on breaker trip)
+  githubIssuesTool = wrapWithLogging(githubIssuesTool, counter);
+  listFilesTool = wrapWithLogging(listFilesTool, counter);
+  readFileTool = wrapWithLogging(readFileTool, counter);
+  commentTool = wrapWithLogging(commentTool, counter);
+  branchTool = wrapWithLogging(branchTool, counter);
+  prTool = wrapWithLogging(prTool, counter);
+  commitFileTool = wrapWithLogging(commitFileTool, counter);
 
   // System prompt - full workflow instructions
   const systemPrompt = `You are a GitHub issue analysis agent for the repository ${owner}/${repo}.

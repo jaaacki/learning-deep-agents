@@ -9,6 +9,7 @@ import {
   ToolCallCounter,
   wrapWithCircuitBreaker,
 } from './github-tools.js';
+import { wrapWithLogging } from './logger.js';
 
 // ── Triage output interface ─────────────────────────────────────────────────
 
@@ -126,6 +127,11 @@ export function createTriageAgent(config: Config, options: { maxToolCalls?: numb
   githubIssuesTool = wrapWithCircuitBreaker(githubIssuesTool, counter);
   listFilesTool = wrapWithCircuitBreaker(listFilesTool, counter);
   readFileTool = wrapWithCircuitBreaker(readFileTool, counter);
+
+  // Structured logging (outermost layer)
+  githubIssuesTool = wrapWithLogging(githubIssuesTool, counter);
+  listFilesTool = wrapWithLogging(listFilesTool, counter);
+  readFileTool = wrapWithLogging(readFileTool, counter);
 
   const systemPrompt = buildTriageSystemPrompt(owner, repo);
 
