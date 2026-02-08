@@ -62,7 +62,7 @@ An autonomous bot that watches a GitHub repository, analyzes new issues with AI,
 
 | # | Issue | Status |
 |---|-------|--------|
-| [#3](../../issues/3) | Triage agent (phase 1 — scope the issue) | Open |
+| [#3](../../issues/3) | Triage agent (phase 1 — scope the issue) | ✓ v0.3.2 |
 | [#4](../../issues/4) | Analysis agent (phase 2 — deep code-aware analysis) | Open |
 
 **Milestone:** Issues go through triage (cheap/fast) then deep analysis (thorough). Each phase can use a different model. LangGraph StateGraph pattern in use.

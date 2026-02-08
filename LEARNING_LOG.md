@@ -3985,3 +3985,290 @@ This validates Entry 24's principle: **build the upstream agent first**. The dow
 | `tests/config.test.ts` | 5 new tests for triageLlm config validation |
 
 ---
+
+## Entry 26: Critic's Phase 4 Review -- Triage Agent
+
+**Date:** 2026-02-08
+**Author:** Critic Agent
+**Reviewed:** Entry 25 implementation (Issue #3, PR #34, branch `issue-3-triage-agent`)
+**Scope:** Triage agent factory, TriageOutput parsing, config extension, CLI subcommand, poll cycle integration, Ollama model fix
+**Files reviewed:** `src/triage-agent.ts`, `src/core.ts`, `src/config.ts`, `src/cli.ts`, `src/model.ts`, `tests/triage-agent.test.ts`, `tests/config.test.ts`, `tests/model.test.ts`, `CHANGELOG.md`, `config.json.example`
+
+### Overall Assessment
+
+This is a well-structured implementation of the first phase of the two-phase pipeline. The triage agent follows the project's established patterns: read-only tool isolation, conservative fallbacks, circuit breaker wrapping, and backwards-compatible config. The code is clean and the test suite is thorough for the parsing layer.
+
+I have 10 findings: one **HIGH** (triage results not passed to the analysis agent), two **MEDIUM** (analysis agent still re-fetches everything; triage-skipped issues mark as "processed" permanently), and the rest LOW/INFO. The HIGH finding is a functional gap that should be addressed before or alongside Issue #4.
+
+### Findings
+
+**Finding #1: Triage results are not passed to the analysis agent -- HIGH**
+
+The triage phase runs, classifies issues, and filters them. But then the analysis phase starts from scratch:
+
+```typescript
+// core.ts ~line 407-420 (after triage block)
+// ── Analysis phase ──────────────────────────────────────────────────────
+
+// Create agent
+const agent = createDeepAgentWithGitHub(config, { maxIssues, dryRun: options.dryRun, maxToolCalls });
+
+// Build user message (include action context for partially-processed issues)
+const userMessage = buildUserMessage(
+  maxIssues,
+  sinceDate,
+  previousIssueNumbers,
+  pollState?.issues,
+);
+```
+
+The `toAnalyze` array (containing triage results with `issueType`, `complexity`, `relevantFiles`, and `summary`) is computed but never used. The analysis agent receives the same `buildUserMessage()` it always did -- it fetches issues from GitHub again via its own tool call, completely ignoring the triage output.
+
+This means:
+- The analysis agent re-fetches the same issues triage already fetched (double API calls)
+- The analysis agent does not receive `relevantFiles` (loses the triage's file scoping)
+- The analysis agent does not know which issues were filtered out by triage -- it might re-discover and analyze them anyway
+- The cost savings from triage filtering are partially negated because the analysis agent might process the skipped issues too
+
+**Teaching moment:** This is the classic "pipeline with a gap" problem. The triage phase produces valuable context (`TriageOutput`), but the handoff to the analysis phase drops that context on the floor. In a StateGraph pipeline (as designed in Entry 24), this handoff is explicit -- the state flows between nodes. In the current imperative integration, the handoff must be done manually, and it was missed.
+
+Entry 24 specifically designed the `TriageOutput` interface as "the contract between triage and analysis phases." The contract exists in code (the interface), but the actual data flow is not connected yet.
+
+**Recommendation:** This is expected to be resolved by Issue #4 (analysis agent), which will consume `TriageOutput`. But the current code is misleading -- it runs triage, computes `toAnalyze`, and then ignores it. At minimum, add a comment: `// TODO(Issue #4): Pass toAnalyze to the analysis agent instead of re-fetching`. Or better, filter the `buildUserMessage()` to only include the approved issue numbers.
+
+**Finding #2: Triage-skipped issues are permanently marked as "processed" -- MEDIUM**
+
+When triage skips an issue, the issue number is added to `lastPollIssueNumbers`:
+
+```typescript
+// core.ts ~line 393
+const allProcessed = [...previousIssueNumbers, ...triageResults.map((r) => r.issue.number)];
+```
+
+This means skipped issues will never be re-triaged, even if:
+- The issue is updated with more information (was "too vague", now has a detailed description)
+- The reporter adds clarifying comments
+- Labels change (a "question" is re-labeled as "bug")
+
+The `since` parameter in `fetchIssuesForPoll` uses `updated_at`, so updated issues would re-appear in the API response. But the `newIssues` filter removes them:
+
+```typescript
+const newIssues = issues.filter((i) => !previousIssueNumbers.includes(i.number));
+```
+
+**Teaching moment:** This reveals a semantic mismatch. `lastPollIssueNumbers` means "issues we have fully processed" in the original design, but here it is overloaded to also mean "issues triage decided to skip." These are different things -- a processed issue should not be re-analyzed, but a skipped issue might deserve re-triage if it changes.
+
+**Possible fix:** Track triage-skipped issues separately from fully-analyzed issues. For example:
+```typescript
+// In poll state:
+{
+  lastPollIssueNumbers: [1, 2, 3],  // fully analyzed
+  triageSkipped: [4, 5],             // skipped by triage, re-triage if updated
+}
+```
+
+Then the filter would only exclude fully-analyzed issues, and skipped issues would be re-triaged if their `updated_at` is newer than the last poll.
+
+**Impact:** Medium -- silently drops issues that might become actionable. For a learning project this is acceptable as a known limitation, but it should be documented.
+
+**Finding #3: Analysis agent still fetches and processes ALL issues despite triage filtering -- MEDIUM**
+
+Related to Finding #1, but a distinct problem. Even when triage runs, the analysis phase calls `buildUserMessage(maxIssues, sinceDate, previousIssueNumbers, ...)` which tells the analysis agent to "fetch open issues" via its own tool call. The analysis agent has no knowledge that triage already filtered the list.
+
+In the worst case, triage says "skip issue #5" but the analysis agent fetches all issues including #5 and analyzes it anyway. The triage filtering is effectively advisory, not enforced.
+
+**Teaching moment:** This is another instance of the "prompt-based constraint" vs "code-enforced constraint" pattern (Entry 14 Finding #1, Entry 23). The triage decision is code-enforced at the triage level, but the downstream analysis agent can still undo it because it has direct access to `fetch_github_issues`.
+
+**Finding #4: `parseTriageOutput` regex is greedy across multiple JSON objects -- LOW**
+
+```typescript
+const jsonMatch = text.match(/\{[\s\S]*\}/);
+```
+
+The `[\s\S]*` is greedy. If the LLM response contains two JSON objects (e.g., the agent calls a tool that returns JSON, and then outputs its own JSON), the regex matches from the first `{` to the last `}`, spanning both objects. The resulting string is likely malformed JSON.
+
+Example: `Tool returned: {"files": ["a.ts"]} Here is my assessment: {"issueType": "bug", ...}` would match `{"files": ["a.ts"]} Here is my assessment: {"issueType": "bug", ...}`, which is not valid JSON. `JSON.parse` would fail and the fallback would activate.
+
+The fallback is safe (defaults to `shouldAnalyze: true`), so this is not dangerous. But it means legitimate triage output could be silently discarded if the LLM includes tool results in its final message.
+
+**Fix:** Use a non-greedy match or extract the last JSON object: `text.match(/\{[^{}]*(?:\{[^{}]*\}[^{}]*)*\}/g)` and take the last match. Or simply search from the end of the string.
+
+**Impact:** Low -- the fallback handles it safely, and well-prompted LLMs typically output clean JSON as their final message.
+
+**Finding #5: Triage creates a new agent (and Octokit client) per issue -- LOW**
+
+```typescript
+// triage-agent.ts:214
+export async function runTriage(config, issue): Promise<TriageOutput> {
+  const agent = createTriageAgent(config);  // creates new agent, new Octokit, new tools
+  // ...
+}
+```
+
+In the poll cycle, `runTriage` is called in a loop for each issue. Each call creates a new agent, new Octokit client, new tool instances, and new circuit breaker counter. For 5 issues, that is 5 agents and 5 Octokit clients.
+
+This is wasteful but not harmful. The circuit breaker counter resets per agent, which means each triage run gets its own budget of 8 tool calls -- this is actually correct behavior (each issue should get its own budget).
+
+However, the Octokit client creation is unnecessary overhead. The agent could be created once and reused across issues.
+
+**Teaching moment:** Agent-per-invocation vs agent-per-session is a design choice. Agent-per-invocation (current) is simpler and avoids conversation state leaking between issues. Agent-per-session would be more efficient but requires resetting the conversation between calls. For a learning project, simplicity wins.
+
+**Finding #6: `skipTriage` flag disconnects the triage and analysis phases -- LOW**
+
+When `options.skipTriage` is true, the entire triage block is skipped and the analysis phase runs as before. But the `previousIssueNumbers` variable is still set from poll state, so the analysis phase correctly handles previously-processed issues.
+
+The issue is that `skipTriage` is accepted as an option but never exposed via CLI. It is an internal escape hatch with no documentation and no tests.
+
+**Recommendation:** Either expose it as `--skip-triage` in the CLI (consistent with `--no-save` and `--dry-run`), or remove it until needed. Dead options accumulate confusion.
+
+**Finding #7: The Ollama model change is unrelated to triage -- INFO**
+
+The diff includes switching `ollama` from `ChatOpenAI` with compatibility wrapper to native `ChatOllama` from `@langchain/ollama`. This is a good improvement (native client is more reliable than the OpenAI compatibility layer), but it is unrelated to the triage agent feature.
+
+The change also adds `@langchain/ollama` as a dependency (visible in `pnpm-lock.yaml`). The tests are updated to mock `ChatOllama` and verify the `baseUrl` `/v1` stripping logic.
+
+**Teaching moment:** Bundling unrelated changes in a feature branch is common but makes code review harder. A reviewer looking at "triage agent" does not expect to also review model client changes. Ideally this would be a separate commit or PR. For a learning project this is fine, but in production it is a common source of review fatigue.
+
+**Finding #8: Config validation uses falsy check, not type check -- LOW**
+
+```typescript
+// config.ts:32
+if (!config.triageLlm.provider) {
+```
+
+The `!` operator catches empty string, `null`, `undefined`, and `0`. This means `{ triageLlm: { provider: 0 } }` would fail validation (correct), but `{ triageLlm: { provider: "  " } }` would pass (a whitespace-only string is truthy). This is the same pattern as the existing `config.llm.provider` check, so it is consistent even if imperfect.
+
+The root cause is still the `Config` type being `any` from `JSON.parse` (Entry 7 Finding #2). Zod validation would catch all these cases.
+
+**Finding #9: `fetchIssuesForPoll` duplicates the existing `fetch_github_issues` tool logic -- LOW**
+
+The triage integration adds a new `fetchIssuesForPoll()` function in `core.ts` that calls `octokit.rest.issues.listForRepo()` directly. The existing `fetch_github_issues` tool in `github-tools.ts` does the same thing.
+
+```typescript
+// core.ts (new)
+async function fetchIssuesForPoll(config, maxIssues, sinceDate) {
+  const { owner, repo, token } = config.github;
+  const octokit = createGitHubClient(token);
+  const { data: issues } = await octokit.rest.issues.listForRepo(params);
+  // ...
+}
+```
+
+This duplication means a change to the issue fetching logic (e.g., filtering out pull requests, which GitHub's API includes in the issues endpoint) would need to be applied in two places.
+
+**Teaching moment:** This is a tension between "tools are for the LLM" and "the orchestrator also needs the same data." The cleanest solution is to extract the shared logic into a function that both the tool and the orchestrator call. But for now, the duplication is small and the risk of divergence is low.
+
+**Finding #10: CHANGELOG accurately documents the changes -- INFO**
+
+The v0.3.2 CHANGELOG entry is well-structured, lists all additions and changes, and correctly notes the total test count (113). The format matches previous entries.
+
+### Test Coverage Assessment
+
+| Feature | Tests | Quality |
+|---------|-------|---------|
+| `parseTriageOutput` -- valid JSON | 1 | Good -- happy path |
+| `parseTriageOutput` -- markdown fences | 1 | Good -- common LLM behavior |
+| `parseTriageOutput` -- surrounding text | 1 | Good -- realistic edge case |
+| `parseTriageOutput` -- no JSON | 1 | Good -- fallback path |
+| `parseTriageOutput` -- malformed JSON | 1 | Good -- fallback path |
+| `parseTriageOutput` -- invalid enum values | 2 | Good -- normalization |
+| `parseTriageOutput` -- non-string array entries | 1 | Good -- type filtering |
+| `parseTriageOutput` -- non-boolean shouldAnalyze | 1 | Good -- defaults to true |
+| `parseTriageOutput` -- missing fields | 1 | Good -- all defaults exercised |
+| `parseTriageOutput` -- non-array relevantFiles | 1 | Good -- type guard |
+| `parseTriageOutput` -- skipReason preservation | 1 | Good |
+| `parseTriageOutput` -- all valid issueType values | 1 | Good -- exhaustive enum check |
+| `parseTriageOutput` -- all valid complexity values | 1 | Good -- exhaustive enum check |
+| `buildTriageMessage` -- content inclusion | 5 | Good -- covers number, title, body, labels, JSON instruction |
+| Config -- triageLlm present | 1 | Good |
+| Config -- triageLlm absent | 1 | Good |
+| Config -- triageLlm missing provider | 1 | Good |
+| Config -- triageLlm missing API key | 1 | Good |
+| Config -- triageLlm ollama no key | 1 | Good |
+| Ollama model creation | 2 | Good -- default and custom baseUrl |
+
+Total: 24 new tests. The `parseTriageOutput` coverage is excellent -- it tests every field, every fallback, and every normalization path. This is one of the most thoroughly-tested parsers in the project.
+
+**What is NOT tested:**
+- `runTriage()` (requires mocking the agent invocation -- reasonable to defer)
+- `runTriageSingle()` (integration-level, requires config + GitHub API)
+- `fetchIssuesForPoll()` and `fetchSingleIssue()` (require Octokit mocks)
+- Triage integration in `runPollCycle()` (integration test, reasonable to defer)
+- The `skipTriage` option path
+- The greedy regex edge case (Finding #4)
+
+The missing tests are all at the integration level, which is harder to mock. The unit-level coverage is strong.
+
+### "Humans Decide" Principle
+
+**Pass.** The triage agent has read-only tools only -- it cannot post comments, create branches, or open PRs. Its only output is a classification. The skip path is visible via console logging. The triage result does not prevent human access to the issue on GitHub.
+
+One nuance: triage-skipped issues are marked as "processed" in poll state (Finding #2), which means the agent will not re-visit them. This is not destructive (the issue is still visible on GitHub), but it is silent. A human monitoring the agent's output would see the skip log line, but there is no persistent record of why an issue was skipped (it is only in console output, not in poll state or a file).
+
+**Recommendation:** Consider writing skip decisions to poll state:
+```json
+{
+  "issues": {
+    "5": { "triageSkipped": true, "skipReason": "Question, not a bug", "triageDate": "2026-02-08T..." }
+  }
+}
+```
+
+This would make the skip path auditable without requiring log parsing.
+
+### Idempotency
+
+**Pass with caveat.** Running triage twice on the same issue produces the same classification (the LLM is deterministic enough for classification tasks with low temperature). No side effects are created.
+
+However, the poll state interaction has the issue described in Finding #2 -- once skipped, an issue is permanently marked as processed. Running the poll cycle again will not re-triage updated issues.
+
+### Unattended Safety
+
+**The fallback is correctly conservative.** If the LLM hallucinates, `parseTriageOutput` normalizes invalid values and defaults `shouldAnalyze` to `true`. If triage fails entirely (exception), the catch block also defaults to `shouldAnalyze: true`. An always-false triage (skips everything) is the concerning case -- but the fallback defaults protect against parsing failures, not against a deliberately pessimistic LLM.
+
+If the triage LLM consistently returns `shouldAnalyze: false` for everything, all issues would be skipped. The console output would show this, but there is no automated alert. For a cron-triggered system, this means the agent silently stops doing work.
+
+**Mitigation idea (not required):** Log a warning if all issues in a batch are skipped: "All N issues skipped by triage -- verify triage model is working correctly."
+
+### Docker / SIGTERM Implications
+
+Triage creates no persistent state during execution -- it only writes to poll state at the end of the poll cycle. If SIGTERM arrives during triage:
+- No partial state is saved (the `savePollState` call happens after triage)
+- The next run will re-triage the same issues (idempotent, no side effects)
+- No GitHub API writes occurred (read-only tools)
+
+This is safe. Container restart re-runs triage cleanly.
+
+### Version Bump Assessment
+
+**Agree with v0.3.2.** The triage agent is a new feature on top of the v0.3.1 baseline. It follows the project's patch-bump-per-feature convention (v0.2.1-v0.2.10 through Phase 2). A minor bump would be premature -- Phase 4 is not complete until Issue #4 (analysis agent + StateGraph pipeline) is done. v0.4.0 should be reserved for the full two-phase pipeline.
+
+### Open Items Carried Forward
+
+| # | Finding | Severity | First flagged |
+|---|---------|----------|---------------|
+| 1 | `config.ts` uses `process.exit` instead of throwing | Low | Entry 7 |
+| 2 | Config type is `any` from `JSON.parse` | Low | Entry 7 |
+| 3 | `bin` field points to `.ts` file (npx fails) | Medium | Entry 17 |
+| 4 | No tests for `createListRepoFilesTool` | Medium | Entry 17 |
+| 5 | Circuit breaker default may be too tight (30) | Medium | Entry 22 |
+| 6 | `runAnalyzeSingle` has no circuit breaker | Low | Entry 22 |
+| 7 | **Triage results not passed to analysis agent** | **HIGH** | **This entry** |
+| 8 | Triage-skipped issues permanently marked as processed | Medium | This entry |
+| 9 | Analysis agent ignores triage filtering | Medium | This entry |
+| 10 | `skipTriage` option not exposed in CLI | Low | This entry |
+
+### HIGH Severity Summary
+
+**One HIGH finding: Finding #1 -- Triage results not passed to analysis agent.**
+
+The triage phase computes `toAnalyze` (filtered issues with classification data) but the analysis phase ignores it and re-fetches everything from scratch. This means:
+1. Triage filtering can be bypassed by the analysis agent
+2. The `relevantFiles` context from triage is lost
+3. Double API calls to fetch the same issues
+
+This does not block the merge because the triage agent itself works correctly in isolation. The gap is in the handoff, which is the responsibility of Issue #4 (analysis agent + pipeline). However, the current code is misleading -- it looks like triage feeds analysis, but it does not.
+
+**Recommendation to team lead:** Merge is safe -- the triage agent is a standalone component that works correctly. The handoff gap should be tracked as a known limitation and addressed in Issue #4. A `// TODO(Issue #4)` comment in `core.ts` at the analysis phase boundary would make this explicit.
+
+---
