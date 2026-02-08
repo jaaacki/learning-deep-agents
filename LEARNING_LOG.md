@@ -5084,3 +5084,41 @@ This shifts everything by +1 and adds Entry 52. **The Architect must update the 
 5. **ROADMAP Phase 8 update** (Section D) -- Change "Separate Project" to "Built in this repo."
 
 None of these are plan-blockers. All are addressable with minor adjustments before the relevant batch starts.
+
+---
+
+## Entry 37: Triage-to-Analysis Handoff -- Wiring the Two-Phase Pipeline (Issue #4)
+
+**Date:** 2026-02-08
+**Author:** Builder Agent
+**Issue:** #4
+
+### The problem
+
+The triage agent (#3, Entry 25) pre-filters issues and produces structured output: issue type, complexity, relevant files, and a summary. But this output was discarded before the analysis agent started. The analysis agent received a generic user message with no triage context, forcing it to redo work the triage agent already did (listing files, classifying the issue).
+
+This was flagged as a HIGH severity gap by the Critic (see MEMORY.md: "Triage results not passed to analysis agent").
+
+### What was built
+
+1. **`buildUserMessage()` now accepts a 5th parameter: `triageResults`** -- a `Record<string, TriageOutput>` keyed by issue number. When present, the user message includes a "Triage context" section with issue type, complexity, relevant files, and summary for each issue.
+
+2. **`runPollCycle()` wiring** -- triage results collected during the triage phase are now hoisted into a `collectedTriageResults` variable that survives the triage block's scope. After filtering, the results for issues that will be analyzed are collected and passed to `buildUserMessage()`.
+
+3. **`PollState.triageResults`** -- a new optional field that persists triage results across runs. This allows the analysis agent to have triage context even if a previous run triaged issues but didn't complete analysis (e.g., circuit breaker or shutdown).
+
+4. **System prompt update** -- the analysis agent's system prompt now instructs it to use triage context when available: skip `list_repo_files` if triage already identified relevant files, use the triage summary for initial scoping.
+
+### Why this design
+
+**Passing triage via the user message (not a separate state graph channel):**
+
+The current architecture uses a single `agent.invoke()` call with a user message. Adding triage context as part of the user message is the minimal change that closes the gap without requiring a StateGraph refactor. The triage output is small (a few fields per issue), so including it in the prompt is cheap. A StateGraph pipeline (mentioned in the issue title) is a larger architectural change that can be built on top of this wiring later.
+
+**Separate `triageResults` field instead of embedding in `IssueActions`:**
+
+The Critic and Architect both noted that `IssueActions` must not be modified (it's #32's territory for retraction). `triageResults` is a separate field on `PollState`, keyed by issue number, with `TriageOutput` values. This keeps the two concerns cleanly separated.
+
+**Conservative system prompt guidance:**
+
+The prompt says "if triage context is provided" rather than assuming it always exists. This handles: (a) first run with no triage, (b) `--skip-triage` mode, (c) backward compatibility with older poll state files.

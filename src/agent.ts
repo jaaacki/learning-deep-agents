@@ -70,7 +70,12 @@ When given issues to analyze, follow this workflow for EACH issue:
 1. ANALYZE the issue:
    - Read the title, body, and labels carefully
    - Identify the type of problem (bug, feature, docs, etc.)
-   - Use list_repo_files to see the repo structure and identify relevant files
+   - If TRIAGE CONTEXT is provided in the user message, use it to jumpstart your analysis:
+     * The triage agent has already classified the issue type and complexity
+     * Start by reading the relevant files it identified (skip list_repo_files if triage already found them)
+     * Use the triage summary to understand the issue scope before diving into code
+     * You may still call list_repo_files if you need to explore beyond what triage found
+   - Otherwise, use list_repo_files to see the repo structure and identify relevant files
    - Use read_repo_file to read the source code of files related to the issue
    - Determine severity and complexity
    - Think about what a fix would involve based on actual code

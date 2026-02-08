@@ -9,6 +9,19 @@
 
 ---
 
+## v0.3.8 — 2026-02-08
+
+### Changed
+- **Triage-to-analysis handoff** (Issue #4) — triage results are now passed to the analysis agent as context
+- `buildUserMessage()` accepts optional `triageResults` parameter (5th argument)
+- When triage context is available, the user message includes issue type, complexity, relevant files, and summary
+- `PollState` gains optional `triageResults` field to persist triage data across runs
+- `runPollCycle()` collects triage results and passes them to `buildUserMessage()`, also saves them in poll state
+- System prompt in `agent.ts` updated to instruct the agent to use triage context (skip `list_repo_files` when triage already identified relevant files)
+- 13 new tests for triage-to-analysis handoff in `tests/core.test.ts`
+
+---
+
 ## v0.3.7 — 2026-02-08
 
 ### Changed
