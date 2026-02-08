@@ -9,6 +9,22 @@
 
 ---
 
+## v0.5.2 — 2026-02-08
+
+### Added
+- **Handle `pull_request.opened` webhook event** (Issue #14) — dispatches PR events from the webhook listener
+- `handlePullRequestEvent()` extracts PR metadata (number, title, body, head/base ref, draft status)
+- **Loop prevention**: `isBotPr()` checks for `<!-- deep-agent-pr -->` HTML marker in PR body OR `issue-N-*` branch naming pattern
+- Bot-created PRs are logged as "queued for review" (stub — actual reviewer bot deferred to Issue #15)
+- Non-bot PRs are ignored (logged and skipped)
+- `handleWebhookEvent()` dispatcher routes events to the correct handler
+- Fire-and-forget pattern: webhook responds 200 immediately, dispatches handler after response
+- `PrReviewStub` interface exported for Issue #15 to wire into
+- `PrHandlerResult` and `PrOpenedData` interfaces for typed handler results
+- 17 new tests: isBotPr (5), handlePullRequestEvent (9), handleWebhookEvent dispatcher (3)
+
+---
+
 ## v0.5.0 — 2026-02-08
 
 **Milestone: Phase 5 (Resilience) complete.** Transient API failures are retried. Container stops don't lose work. Agent actions can be retracted by humans via CLI. Tool calls are logged with arguments and timing.
