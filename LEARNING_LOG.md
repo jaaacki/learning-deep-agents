@@ -5337,3 +5337,44 @@ The webhook endpoint responds 200 immediately, then dispatches to handlers. This
 ### Test coverage
 
 17 new tests covering: `isBotPr` helper (5), `handlePullRequestEvent` (9 cases including bot/non-bot/missing-data/wrong-action), `handleWebhookEvent` dispatcher (3). Total: 215 tests across 8 files.
+
+---
+
+## Entry 42: Docker + Caddy Deployment -- From Local Script to Containerized Service (Issue #21)
+
+**Date:** 2026-02-09
+**Author:** Builder Agent
+**Issue:** #21 — Docker + Caddy deployment
+
+### Why containerize?
+
+The project started as a cron-triggered script (`poll.sh`), but with the webhook listener (Issue #12), it became a long-running service. Long-running services need:
+
+1. **Process supervision** -- restart on crash (Docker's `restart: unless-stopped`)
+2. **TLS termination** -- GitHub webhook payloads should be delivered over HTTPS
+3. **Reproducible environment** -- Node 24+ requirement is enforced by the base image, not by documentation
+
+Docker Compose ties these together: the bot container runs the webhook listener, and Caddy handles TLS + reverse proxying.
+
+### Why Caddy over Nginx?
+
+Caddy provides **automatic HTTPS** out of the box. With Nginx, you need to set up certbot, configure cron for certificate renewal, write the TLS configuration manually, and handle the ACME challenge. Caddy does all of this with zero configuration beyond the domain name. For a learning project, this eliminates an entire category of ops complexity.
+
+### Design decisions
+
+**Single-stage Dockerfile.** A multi-stage build (build stage + runtime stage) is common for TypeScript projects that compile to JavaScript. We skip this because `tsx` runs TypeScript directly -- there is no build step. The image installs all dependencies (including devDependencies like `tsx` and `vitest`) because `tsx` is needed at runtime to execute TypeScript. This keeps the Dockerfile simple at the cost of a slightly larger image. A future optimization could move `tsx` to production dependencies and use `--prod`.
+
+**Corepack for pnpm.** Node 24 ships with corepack, which can install pnpm without a separate `npm install -g pnpm` step. This is cleaner than adding a global npm install and avoids version drift.
+
+**Health-gated startup.** The `docker-compose.yml` uses `depends_on: { bot: { condition: service_healthy } }` so Caddy only starts accepting traffic after the bot's `/health` endpoint responds. This prevents Caddy from proxying to a container that is not ready yet.
+
+**Volume mounts, not COPY.** `config.json` is mounted read-only at runtime, not copied into the image. This keeps credentials out of the Docker image layer history. `last_poll.json` and `issues/` are mounted read-write so state persists across container restarts.
+
+**.dockerignore.** Excludes `node_modules/` (rebuilt inside the container), `.git/` (large, not needed at runtime), `config.json` and `last_poll.json` (secrets and state), and test files (not needed in production). This keeps the build context small and avoids accidentally baking credentials into the image.
+
+### What this does NOT do
+
+- No CI/CD pipeline -- this is a deployment recipe, not an automated release system
+- No Docker registry push -- images are built locally on the server
+- No secrets management beyond file mounts -- a production system would use Docker secrets or a vault
+- No horizontal scaling -- single instance is sufficient for a learning project

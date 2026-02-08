@@ -1,0 +1,36 @@
+services:
+  bot:
+    build: .
+    container_name: deepagents-bot
+    restart: unless-stopped
+    expose:
+      - "3000"
+    volumes:
+      - ./config.json:/app/config.json:ro
+      - ./last_poll.json:/app/last_poll.json
+      - ./issues:/app/issues
+    healthcheck:
+      test: ["CMD", "node", "-e", "fetch('http://localhost:3000/health').then(r=>{if(!r.ok)throw r.status}).catch(()=>process.exit(1))"]
+      interval: 30s
+      timeout: 5s
+      start_period: 10s
+      retries: 3
+
+  caddy:
+    image: caddy:2
+    container_name: deepagents-caddy
+    restart: unless-stopped
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy_data:/data
+      - caddy_config:/config
+    depends_on:
+      bot:
+        condition: service_healthy
+
+volumes:
+  caddy_data:
+  caddy_config:

@@ -9,6 +9,18 @@
 
 ---
 
+## v0.6.1 — 2026-02-09
+
+### Added
+- **Docker + Caddy deployment** (Issue #21) — containerized deployment with automatic HTTPS
+- `Dockerfile`: Node 24-slim base, pnpm via corepack, healthcheck against GET /health
+- `docker-compose.yml`: two-service stack (bot + Caddy reverse proxy) with health-gated startup
+- `Caddyfile`: reverse proxy with automatic TLS via Let's Encrypt (placeholder domain)
+- `.dockerignore`: excludes node_modules, .git, credentials, tests, and generated files
+- README "Docker Deployment" section with step-by-step setup instructions
+
+---
+
 ## v0.6.0 — 2026-02-09
 
 **Milestone: Phase 6 (Webhook & Real-Time) partially complete.** The webhook listener now dispatches `issues.opened` and `pull_request.opened` events. Issue #18 (persistent job queue) deferred — not needed for learning goals.
