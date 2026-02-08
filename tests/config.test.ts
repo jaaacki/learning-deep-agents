@@ -101,4 +101,65 @@ describe('loadConfig', () => {
     const config = loadConfig();
     expect(config.llm.provider).toBe('openai-compatible');
   });
+
+  it('accepts config with triageLlm specified', () => {
+    const triageConfig = {
+      ...validConfig,
+      triageLlm: { provider: 'anthropic', apiKey: 'sk-ant-triage', model: 'claude-haiku-4-5-20251001' },
+    };
+    vi.mocked(fs.existsSync).mockReturnValue(true);
+    vi.mocked(fs.readFileSync).mockReturnValue(JSON.stringify(triageConfig));
+
+    const config = loadConfig();
+    expect(config.triageLlm.provider).toBe('anthropic');
+    expect(config.triageLlm.model).toBe('claude-haiku-4-5-20251001');
+  });
+
+  it('accepts config without triageLlm (falls back to main llm)', () => {
+    vi.mocked(fs.existsSync).mockReturnValue(true);
+    vi.mocked(fs.readFileSync).mockReturnValue(JSON.stringify(validConfig));
+
+    const config = loadConfig();
+    expect(config.triageLlm).toBeUndefined();
+  });
+
+  it('exits when triageLlm.provider is missing', () => {
+    const bad = {
+      ...validConfig,
+      triageLlm: { provider: '', apiKey: 'sk-ant-triage', model: 'claude-haiku' },
+    };
+    vi.mocked(fs.existsSync).mockReturnValue(true);
+    vi.mocked(fs.readFileSync).mockReturnValue(JSON.stringify(bad));
+
+    expect(() => loadConfig()).toThrow('process.exit');
+    expect(console.error).toHaveBeenCalledWith(
+      expect.stringContaining('triageLlm.provider is required')
+    );
+  });
+
+  it('exits when triageLlm API key is missing for cloud providers', () => {
+    const bad = {
+      ...validConfig,
+      triageLlm: { provider: 'anthropic', apiKey: '', model: 'claude-haiku' },
+    };
+    vi.mocked(fs.existsSync).mockReturnValue(true);
+    vi.mocked(fs.readFileSync).mockReturnValue(JSON.stringify(bad));
+
+    expect(() => loadConfig()).toThrow('process.exit');
+    expect(console.error).toHaveBeenCalledWith(
+      expect.stringContaining('Missing triageLlm API key')
+    );
+  });
+
+  it('does NOT exit when triageLlm API key is missing for ollama', () => {
+    const triageOllama = {
+      ...validConfig,
+      triageLlm: { provider: 'ollama', apiKey: '', model: 'llama3' },
+    };
+    vi.mocked(fs.existsSync).mockReturnValue(true);
+    vi.mocked(fs.readFileSync).mockReturnValue(JSON.stringify(triageOllama));
+
+    const config = loadConfig();
+    expect(config.triageLlm.provider).toBe('ollama');
+  });
 });

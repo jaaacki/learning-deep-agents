@@ -3527,3 +3527,461 @@ This session surfaced three layers of enforcement:
 The mistake is using prompts for things that need code enforcement, or code for things that need architectural separation. The self-review is correctly a prompt-level concern (it's advisory). The circuit breaker is correctly code-level (it's a hard limit). The reviewer bot is correctly architectural (it's a separate trust boundary).
 
 ---
+
+## Entry 24: Phase 4 Architecture -- Two-Phase Agent Pipeline (Triage + Analysis)
+
+**Date:** 2026-02-08
+**Author:** Architect Agent
+**Builds on:** Entries 1, 8, 23
+
+### Why Phase 4 exists
+
+After Phases 1-3, the agent is code-aware, safe, testable, and can commit real changes. But it has one fundamental inefficiency: **every issue gets the same treatment**. A typo in a README and a complex race condition in the core loop both trigger the full 7-step workflow -- read the entire codebase, post a detailed comment, write an analysis file, create a branch, commit a fix, self-review, and open a PR.
+
+This is expensive. Each full run can burn dozens of tool calls and thousands of LLM tokens. Phase 4 introduces **two-phase processing** to fix this: a cheap, fast **triage agent** scopes each issue first, then an expensive, thorough **analysis agent** does the deep work -- but only when the triage agent says it is worth it.
+
+### The conceptual shift: ReAct loop to StateGraph
+
+Through Phases 1-3, the project used a single ReAct loop. Here is what that looks like:
+
+```
+User message
+    |
+    v
+[Single Agent: ReAct Loop]
+    |-- call tool --> get result --> think --> call tool --> ...
+    |
+    v
+Final response
+```
+
+The ReAct pattern (Reason + Act) is a loop: the LLM thinks, picks a tool, sees the result, thinks again, picks another tool, and so on until it decides it is done. This is powerful but monolithic -- one model, one system prompt, one continuous chain of thought.
+
+**LangGraph's StateGraph** breaks this into a directed graph of discrete steps:
+
+```
+[Fetch Issues]
+      |
+      v
+[Triage Agent] ──── should_analyze? ────┐
+      |                                  |
+      | (yes)                      (no)  |
+      v                                  v
+[Analysis Agent]                   [Log & Skip]
+      |
+      v
+[Post Results]
+```
+
+Each box is a **node** (a function or agent). Each arrow is an **edge** (a transition). Conditional edges let us route based on the triage output. The graph carries a **state** object that flows between nodes, accumulating context.
+
+### Why this matters for learning
+
+If you are studying agentic systems, this is the biggest conceptual jump in the project:
+
+| Concept | ReAct (Phases 1-3) | StateGraph (Phase 4) |
+|---------|-------------------|---------------------|
+| **Structure** | One agent, one loop | Multiple agents, explicit graph |
+| **Decisions** | Implicit (LLM decides when to stop) | Explicit (conditional edges) |
+| **Model selection** | One model for everything | Different model per node |
+| **Debugging** | Read the full conversation trace | Inspect state at each node |
+| **Cost control** | Circuit breaker (hard stop) | Route cheap issues to cheap processing |
+
+The StateGraph does not replace ReAct -- each node *inside* the graph can still use a ReAct loop internally. The graph adds structure *around* the loops.
+
+### LangGraph StateGraph: how it works
+
+LangGraph (the `@langchain/langgraph` package, used by `deepagents`) provides the `StateGraph` class. Here is the mental model:
+
+**1. Define the state schema.** This is a TypeScript type (or Zod schema) that describes what data flows between nodes. Every node reads from and writes to this shared state.
+
+```typescript
+// Conceptual state for the two-phase pipeline
+interface PipelineState {
+  issue: {                // The GitHub issue being processed
+    number: number;
+    title: string;
+    body: string;
+    labels: string[];
+  };
+  triage: {               // Output from the triage agent
+    issueType: 'bug' | 'feature' | 'docs' | 'question' | 'unknown';
+    complexity: 'trivial' | 'simple' | 'moderate' | 'complex';
+    relevantFiles: string[];
+    shouldAnalyze: boolean;
+    skipReason?: string;
+    summary: string;
+  } | null;
+  analysis: {             // Output from the analysis agent
+    comment: string;
+    documentPath: string;
+    branch: string;
+    prNumber: number;
+  } | null;
+}
+```
+
+**2. Define the nodes.** Each node is a function that takes the current state and returns a partial state update. The graph merges the updates into the running state.
+
+```typescript
+// Triage node: lightweight, fast
+async function triageNode(state: PipelineState): Promise<Partial<PipelineState>> {
+  // Call the triage agent (cheap model, limited tools)
+  const triageResult = await triageAgent.invoke({ issue: state.issue });
+  return { triage: triageResult };
+}
+
+// Analysis node: thorough, expensive
+async function analysisNode(state: PipelineState): Promise<Partial<PipelineState>> {
+  // Call the analysis agent (expensive model, full tool suite)
+  // Uses state.triage to know what files to focus on
+  const analysisResult = await analysisAgent.invoke({
+    issue: state.issue,
+    triage: state.triage,
+  });
+  return { analysis: analysisResult };
+}
+```
+
+**3. Define the edges.** Edges connect nodes. Conditional edges inspect the state to decide where to go next.
+
+```typescript
+// Conditional edge: should we analyze or skip?
+function shouldAnalyze(state: PipelineState): 'analyze' | 'skip' {
+  if (state.triage?.shouldAnalyze) return 'analyze';
+  return 'skip';
+}
+```
+
+**4. Wire the graph.**
+
+```typescript
+const graph = new StateGraph({ schema: PipelineStateSchema })
+  .addNode('triage', triageNode)
+  .addNode('analyze', analysisNode)
+  .addNode('skip', skipNode)
+  .addEdge('__start__', 'triage')
+  .addConditionalEdges('triage', shouldAnalyze, {
+    analyze: 'analyze',
+    skip: 'skip',
+  })
+  .addEdge('analyze', '__end__')
+  .addEdge('skip', '__end__');
+
+const pipeline = graph.compile();
+```
+
+When you call `pipeline.invoke({ issue })`, LangGraph executes the graph step by step: start -> triage -> (condition) -> analyze or skip -> end. The state accumulates through each step.
+
+### How the `deepagents` package supports this
+
+The `deepagents` package (v1.7.2) already provides the building blocks:
+
+1. **`createDeepAgent()`** creates a ReAct agent with built-in middleware (todo list, filesystem tools, summarization). It returns a `DeepAgent` which is a `ReactAgent` wrapped with type information.
+
+2. **Subagents.** `createDeepAgent` accepts a `subagents` parameter -- an array of `SubAgent` specs. Each subagent has its own `name`, `description`, `systemPrompt`, `tools`, and optionally a different `model`. The main agent can delegate work to subagents via the built-in `task` tool.
+
+3. **LangGraph's `StateGraph`** (from `@langchain/langgraph`) is available as a direct dependency. We can use it to build the two-phase pipeline without the `task` tool -- instead of one agent delegating to another dynamically, we wire the agents into a fixed graph with explicit transitions.
+
+**Which approach for Phase 4?** Two options:
+
+| Approach | How it works | Pros | Cons |
+|----------|-------------|------|------|
+| **Subagent delegation** | Main agent uses `task` tool to call triage/analysis subagents | Simple setup, leverages existing `createDeepAgent` | Routing decision is made by the LLM (prompt-based), not code-enforced |
+| **StateGraph pipeline** | Explicit graph with triage and analysis as nodes | Routing is deterministic (code-enforced), each node gets exactly the right tools | More code to write, new pattern to learn |
+
+**Decision: StateGraph pipeline.** The whole point of Phase 4 is learning the StateGraph pattern (Entry 8 calls it out explicitly). And the routing decision -- "should this issue get deep analysis?" -- is exactly the kind of thing that should be code-enforced, not left to prompt-based suggestions (a recurring theme from Entries 14, 20, 23).
+
+### What changes in the codebase
+
+Here is the current flow and the target flow:
+
+**Current (single agent):**
+
+```
+src/index.ts
+  → loadConfig()
+  → src/core.ts: runPollCycle()
+      → src/agent.ts: createDeepAgentWithGitHub()
+          → creates ONE agent with ALL tools and ONE system prompt
+      → agent.invoke({ messages: [userMessage] })
+      → extract poll state from conversation
+      → save state
+```
+
+**Target (two-phase pipeline):**
+
+```
+src/index.ts
+  → loadConfig()
+  → src/core.ts: runPollCycle()
+      → src/pipeline.ts: createPipeline()       <-- NEW FILE
+          → creates triage agent (cheap model, read-only tools)
+          → creates analysis agent (expensive model, full tools)
+          → wires them into a StateGraph
+      → pipeline.invoke({ issues })
+      → extract poll state from graph state
+      → save state
+```
+
+**New files:**
+
+| File | Purpose |
+|------|---------|
+| `src/pipeline.ts` | StateGraph definition: nodes, edges, state schema |
+| `src/triage-agent.ts` | Triage agent factory: cheap model, limited tools, scoping prompt |
+| `src/analysis-agent.ts` | Analysis agent factory: expensive model, full tools, deep analysis prompt |
+
+**Changed files:**
+
+| File | What changes |
+|------|-------------|
+| `src/core.ts` | `runPollCycle()` calls `createPipeline()` instead of `createDeepAgentWithGitHub()` |
+| `src/agent.ts` | Kept for backwards compatibility, but the pipeline becomes the primary entry point |
+| `src/config.ts` | May need a `triageModel` field alongside the existing `llm` config |
+| `src/index.ts` | No change -- it still calls `runPollCycle()` |
+
+### The triage agent: what it does and what it does NOT do
+
+The triage agent is the first phase. Its job is to **scope** the issue quickly and cheaply:
+
+**What it does:**
+- Reads the issue title, body, and labels
+- Calls `list_repo_files` to see the repo structure
+- Optionally calls `read_repo_file` on 1-2 files to confirm relevance
+- Classifies the issue type (bug, feature, docs, question)
+- Estimates complexity (trivial, simple, moderate, complex)
+- Identifies which files are most relevant
+- Decides: should this issue proceed to full analysis?
+
+**What it does NOT do:**
+- Post comments on the issue
+- Write analysis files
+- Create branches
+- Open PRs
+- Read more than a few files
+
+The triage agent has access to **read-only tools only**: `fetch_github_issues`, `list_repo_files`, `read_repo_file`. No write tools. This is a deliberate constraint -- the triage phase should be cheap, fast, and side-effect-free.
+
+**Model choice:** The triage agent can use a smaller, cheaper model (e.g., Claude Haiku, GPT-4o-mini). Its task is classification and scoping, not deep reasoning. This is the **model routing** pattern: use the right model for the right job.
+
+### The analysis agent: picking up where triage left off
+
+The analysis agent is the second phase. It receives the triage output as context and performs the full 7-step workflow from Entry 23:
+
+1. **Analyze** -- but now it already knows the issue type, complexity, and relevant files (from triage). It can skip the exploratory phase and go straight to the relevant code.
+2. **Comment** -- post findings on the issue.
+3. **Document** -- write `./issues/issue_<number>.md`.
+4. **Branch** -- create the feature branch.
+5. **Commit** -- push proposed changes.
+6. **Self-review** -- read back and sanity-check.
+7. **PR** -- open the draft PR.
+
+The analysis agent has access to **all tools**: both read-only and write tools. It uses the full (expensive) model because its task requires deep reasoning about code.
+
+**Key advantage:** The analysis agent receives `triage.relevantFiles` in its state. Instead of calling `list_repo_files` and scanning the entire repo (like the current single agent does), it can jump directly to the files that matter. This saves tool calls, reduces token usage, and focuses the analysis.
+
+### The state contract: how triage feeds analysis
+
+The triage agent's output is the analysis agent's input. This is the **interface** between the two phases. Getting this interface right is critical -- it determines what information flows downstream.
+
+```typescript
+interface TriageOutput {
+  issueType: 'bug' | 'feature' | 'docs' | 'question' | 'unknown';
+  complexity: 'trivial' | 'simple' | 'moderate' | 'complex';
+  relevantFiles: string[];      // file paths the analysis agent should focus on
+  shouldAnalyze: boolean;       // false = skip this issue
+  skipReason?: string;          // why we're skipping (logged for debugging)
+  summary: string;              // one-paragraph scope statement
+}
+```
+
+This is why **Issue #3 (triage) must be built before Issue #4 (analysis)**. The triage agent *defines* this interface. The analysis agent *consumes* it. If you built the analysis agent first, you would have to guess what the triage output looks like -- and you would guess wrong, because the shape of the triage output only becomes clear when you actually build the triage agent and see what information it naturally produces.
+
+This is a general principle in multi-agent systems: **build the upstream agent first**. The upstream agent defines the contract; the downstream agent implements against it.
+
+### Dependency map for Phase 4
+
+```
+Phase 1-3 (complete)
+    |
+    | Provides: tools (list_repo_files, read_repo_file, comment_on_issue, etc.)
+    | Provides: test infrastructure (vitest, mocks)
+    | Provides: CLI (deepagents poll, deepagents analyze)
+    | Provides: safety (circuit breaker, idempotency, dry-run)
+    |
+    v
+Issue #3: Triage Agent
+    |
+    | Defines: TriageOutput interface (the state contract)
+    | Defines: triage system prompt
+    | Produces: src/triage-agent.ts
+    | Tests: unit tests with mocked LLM
+    |
+    v
+Issue #4: Analysis Agent
+    |
+    | Consumes: TriageOutput interface
+    | Defines: analysis system prompt (enhanced with triage context)
+    | Produces: src/analysis-agent.ts, src/pipeline.ts
+    | Changes: src/core.ts (switch from single agent to pipeline)
+    | Tests: unit tests with mocked LLM, integration test for full pipeline
+    |
+    v
+Phase 4 Complete (v0.5.0 milestone -- per Entry 8 versioning plan)
+```
+
+**What Phase 4 depends on from earlier phases:**
+
+| Dependency | From | Why |
+|-----------|------|-----|
+| `list_repo_files`, `read_repo_file` | Phase 1 | Triage agent needs to see the codebase |
+| Circuit breaker, idempotency | Phase 2 | Both agents need bounded, safe tool usage |
+| Dry-run mode | Phase 2 | Testing the pipeline without side effects |
+| Test infrastructure | Phase 3 | Unit testing each agent independently |
+| `create_or_update_file`, self-review | Phase 3 | Analysis agent commits code and reviews it |
+
+### The skip path: when triage says "no"
+
+Not every issue needs full analysis. The triage agent might decide to skip an issue because:
+
+- It is a **question**, not a bug or feature (better handled by a human)
+- It is a **duplicate** of an already-processed issue
+- It is **too vague** to act on (needs more information from the reporter)
+- It is **out of scope** (targets a different repo or external dependency)
+
+When `shouldAnalyze: false`, the graph follows the skip edge. The skip node logs the reason and moves on. No tools are called, no comments posted, no branches created. The issue can be re-triaged on the next poll if it gets updated.
+
+This is where the cost savings come from. If 3 out of 5 issues in a poll run are skippable, the pipeline runs the expensive analysis agent only twice instead of five times.
+
+### Model routing: the right model for the right job
+
+Phase 4 introduces a second model configuration. The current `config.json` has one `llm` block:
+
+```json
+{
+  "llm": {
+    "provider": "anthropic",
+    "apiKey": "...",
+    "model": "claude-sonnet-4-5-20250929"
+  }
+}
+```
+
+For Phase 4, we need to support a triage model separately:
+
+```json
+{
+  "llm": {
+    "provider": "anthropic",
+    "apiKey": "...",
+    "model": "claude-sonnet-4-5-20250929"
+  },
+  "triageLlm": {
+    "provider": "anthropic",
+    "apiKey": "...",
+    "model": "claude-haiku-4-5-20251001"
+  }
+}
+```
+
+If `triageLlm` is not specified, both agents use the same model. This keeps the config backwards-compatible -- existing users do not need to change anything.
+
+**Why different models?** Cost and latency. A triage classification can be done by a small model in milliseconds. Deep code analysis needs a large model that reasons carefully. Using the same large model for both is wasteful. The model routing pattern is one of the most practical cost-optimization techniques in production agentic systems.
+
+### What this teaches about agent architecture
+
+Phase 4 teaches three patterns that come up repeatedly in production agentic systems:
+
+**1. Pipeline decomposition.** Breaking a monolithic agent into stages with defined interfaces. Each stage has a clear responsibility, its own prompt, and its own tool set. This is the agent equivalent of Unix pipes: each program does one thing well, and the output of one feeds the input of the next.
+
+**2. Conditional routing.** Not every input takes the same path through the pipeline. The StateGraph's conditional edges make this explicit and deterministic. Compare this to the alternative: putting "skip low-priority issues" in the system prompt and hoping the LLM follows it. The StateGraph approach is code-enforced routing (Entry 23's "code constraint" layer).
+
+**3. Model routing.** Different stages can use different models, optimized for their specific task. This is the beginning of a cost model for agentic systems: total cost = (triage cost per issue x all issues) + (analysis cost per issue x analyzed issues). If triage is 10x cheaper than analysis and filters out 60% of issues, the pipeline is roughly 5x cheaper than running full analysis on everything.
+
+### Connection to future entries
+
+The Builder agent will implement Phase 4 in two entries:
+- Entry 25: Implementing the triage agent (Issue #3) -- the triage system prompt, read-only tool set, and TriageOutput interface
+- Entry 26: Implementing the analysis agent and pipeline (Issue #4) -- the StateGraph wiring, enhanced analysis prompt, and pipeline integration into `runPollCycle()`
+
+After both are complete, we will write a Phase 4 retrospective entry.
+
+---
+
+## Entry 25: Implementing the Triage Agent (Issue #3)
+
+**Date:** 2026-02-08
+**Author:** Builder Agent
+**Builds on:** Entry 24
+
+### What just happened
+
+Entry 24 designed the two-phase pipeline architecture. This entry implements the first phase: the triage agent. The triage agent is a standalone component that classifies GitHub issues quickly and cheaply, deciding which ones deserve expensive full analysis.
+
+### The pattern: structured JSON output from an LLM
+
+The triage agent needs to return a structured `TriageOutput` object, but it is an LLM -- it returns text, not typed data. The simplest approach that works reliably: instruct the agent via system prompt to output raw JSON, then parse and validate the response.
+
+```typescript
+// The system prompt says: "Your FINAL message must be the JSON object and nothing else."
+// The parser extracts JSON, validates fields, and falls back to safe defaults.
+export function parseTriageOutput(text: string): TriageOutput {
+  const jsonMatch = text.match(/\{[\s\S]*\}/);
+  if (!jsonMatch) return { ...FALLBACK_TRIAGE };
+  // ... parse, validate, normalize
+}
+```
+
+**Why not structured output (tool_use/function_call)?** Structured output schemas vary by provider. The JSON-in-text approach works with any LLM -- Anthropic, OpenAI, Ollama, local models. Since this is a learning project that supports multiple providers, portability wins over elegance.
+
+**Why a conservative fallback?** If parsing fails, we default to `shouldAnalyze: true`. It is better to over-analyze (wasting some tokens) than to skip a real issue. The fallback is the triage agent's error budget.
+
+### The pattern: read-only tool isolation
+
+The triage agent has access to exactly three tools: `fetch_github_issues`, `list_repo_files`, `read_repo_file`. All are read-only. It cannot post comments, create branches, or open PRs.
+
+This is **tool isolation** -- giving each agent exactly the capabilities it needs and no more. The constraint is enforced at the code level (the agent is constructed with only read-only tools), not at the prompt level. This is a recurring theme from Entries 14, 20, and 24: code-enforced constraints are more reliable than prompt-based ones.
+
+The triage agent also has its own tight circuit breaker (8 tool calls max). A triage that needs more than 8 tool calls is doing too much work -- it should be fast.
+
+### The pattern: model routing via config fallback
+
+```typescript
+const modelConfig = config.triageLlm
+  ? { ...config, llm: config.triageLlm }
+  : config;
+const model = createModel(modelConfig);
+```
+
+If `triageLlm` is configured, the triage agent uses a different (typically cheaper) model. If not, it falls back to the main `llm` config. This is backwards-compatible -- existing configs work without changes.
+
+### How triage integrates into the poll cycle
+
+The poll cycle now has two phases:
+
+1. **Fetch + Triage:** Fetch new issues from GitHub (via direct Octokit call, not through the agent). For each new issue, run the triage agent. Issues where `shouldAnalyze: false` are logged and skipped.
+
+2. **Analysis:** The existing full agent runs on the remaining issues (the ones triage approved).
+
+This means the poll cycle now makes its own decision about which issues to analyze, rather than delegating everything to a single monolithic agent. The triage decision is code-enforced via the `shouldAnalyze` boolean.
+
+### Aha moment: the triage agent is the interface definition
+
+Building the triage agent forced us to define `TriageOutput` concretely. Before implementation, the interface was conceptual (Entry 24's design). After implementation, it is battle-tested -- we know exactly what fields the LLM actually produces, what edge cases arise (missing fields, invalid enum values), and how to handle parsing failures.
+
+This validates Entry 24's principle: **build the upstream agent first**. The downstream analysis agent (Issue #4) will consume `TriageOutput`. Now that interface is real, tested with 19 unit tests, and has clear fallback semantics.
+
+### Files changed
+
+| File | What changed |
+|------|-------------|
+| `src/triage-agent.ts` | **NEW** -- triage agent factory, TriageOutput interface, parser, message builder |
+| `src/config.ts` | Added `triageLlm` validation (optional, falls back to main llm) |
+| `src/core.ts` | Added `fetchSingleIssue()`, `runTriageSingle()`, triage pre-filter in `runPollCycle()` |
+| `src/cli.ts` | Added `triage` subcommand: `deepagents triage --issue N` |
+| `config.json.example` | Added `triageLlm` field placeholder |
+| `tests/triage-agent.test.ts` | **NEW** -- 19 tests for parseTriageOutput and buildTriageMessage |
+| `tests/config.test.ts` | 5 new tests for triageLlm config validation |
+
+---

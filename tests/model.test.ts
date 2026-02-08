@@ -15,9 +15,17 @@ vi.mock('@langchain/openai', () => ({
   })),
 }));
 
+vi.mock('@langchain/ollama', () => ({
+  ChatOllama: vi.fn().mockImplementation((opts: any) => ({
+    _type: 'ollama',
+    ...opts,
+  })),
+}));
+
 import { createModel } from '../src/model.js';
 import { ChatAnthropic } from '@langchain/anthropic';
 import { ChatOpenAI } from '@langchain/openai';
+import { ChatOllama } from '@langchain/ollama';
 
 beforeEach(() => {
   vi.clearAllMocks();
@@ -86,28 +94,28 @@ describe('createModel', () => {
     ).toThrow('requires a baseUrl');
   });
 
-  it('creates ChatOpenAI with Ollama defaults for "ollama" provider', () => {
+  it('creates ChatOllama for "ollama" provider', () => {
     createModel({
       llm: { provider: 'ollama', model: 'llama3' },
     } as any);
 
-    expect(ChatOpenAI).toHaveBeenCalledWith(
+    expect(ChatOllama).toHaveBeenCalledTimes(1);
+    expect(ChatOllama).toHaveBeenCalledWith(
       expect.objectContaining({
-        apiKey: 'ollama',
         model: 'llama3',
-        configuration: { baseURL: 'http://localhost:11434/v1' },
+        baseUrl: 'http://localhost:11434',
       })
     );
   });
 
-  it('uses custom baseUrl for ollama when provided', () => {
+  it('strips /v1 from baseUrl for ollama', () => {
     createModel({
       llm: { provider: 'ollama', model: 'llama3', baseUrl: 'http://remote:11434/v1' },
     } as any);
 
-    expect(ChatOpenAI).toHaveBeenCalledWith(
+    expect(ChatOllama).toHaveBeenCalledWith(
       expect.objectContaining({
-        configuration: { baseURL: 'http://remote:11434/v1' },
+        baseUrl: 'http://remote:11434',
       })
     );
   });

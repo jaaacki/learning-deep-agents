@@ -9,6 +9,25 @@
 
 ---
 
+## v0.3.2 — 2026-02-08
+
+### Added
+- **Triage agent** (Issue #3) — first phase of the two-phase agent pipeline
+- New `src/triage-agent.ts` with `createTriageAgent()` factory, read-only tools only
+- `TriageOutput` interface: issueType, complexity, relevantFiles, shouldAnalyze, skipReason, summary
+- `parseTriageOutput()` parses LLM JSON response with validation and fallback
+- `triageLlm` optional config field for using a cheaper model for triage
+- `deepagents triage --issue N` CLI subcommand for standalone triage
+- Triage pre-filter wired into `runPollCycle()` — issues are triaged before full analysis
+- `fetchSingleIssue()` and `runTriageSingle()` exported from core for reuse
+- 24 new unit tests (19 triage + 5 config) — total 113
+
+### Changed
+- `runPollCycle()` now fetches issues and runs triage before invoking the analysis agent
+- `config.json.example` updated with `triageLlm` field placeholder
+
+---
+
 ## v0.3.1 — 2026-02-08
 
 ### Added
