@@ -24,10 +24,11 @@ The agent never merges PRs. It only proposes fixes as drafts.
 
 ## Setup
 
-### 1. Install dependencies
+### 1. Clone and install
 
 ```bash
-cd ~/Dev/deepagents
+git clone https://github.com/jaaacki/learning-deep-agents.git
+cd learning-deep-agents
 npm install
 ```
 
