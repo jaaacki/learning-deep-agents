@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 
 import { loadConfig } from './config.js';
-import { runPollCycle, runAnalyzeSingle, showStatus } from './core.js';
+import { runPollCycle, runAnalyzeSingle, runTriageSingle, showStatus } from './core.js';
 
 /**
  * CLI entry point for the Deep Agents GitHub Issue Poller.
@@ -20,6 +20,7 @@ Usage: deepagents <command> [options]
 Commands:
   poll              Run a poll cycle: fetch, analyze, comment, branch, PR
   analyze           Analyze a single issue by number
+  triage            Run triage on a single issue (classify without side effects)
   status            Show current polling state
   help              Show this help message
 
@@ -32,12 +33,16 @@ Options for 'poll':
 Options for 'analyze':
   --issue N         Issue number to analyze (required)
 
+Options for 'triage':
+  --issue N         Issue number to triage (required)
+
 Examples:
   deepagents poll
   deepagents poll --dry-run
   deepagents poll --no-save
   deepagents poll --max-issues 3
   deepagents analyze --issue 42
+  deepagents triage --issue 42
   deepagents status
 `.trim();
 
@@ -120,6 +125,25 @@ async function main() {
 
       console.log('\u{1F916} Deep Agents GitHub Issue Analyzer\n');
       await runAnalyzeSingle(config, issueNumber);
+      break;
+    }
+
+    case 'triage': {
+      const triageIssueStr = flags['issue'];
+      if (!triageIssueStr || typeof triageIssueStr !== 'string') {
+        console.error('--issue N is required for the triage command');
+        console.log('\nUsage: deepagents triage --issue 42');
+        process.exit(1);
+      }
+
+      const triageIssueNumber = parseInt(triageIssueStr, 10);
+      if (isNaN(triageIssueNumber) || triageIssueNumber < 1) {
+        console.error('--issue must be a positive integer');
+        process.exit(1);
+      }
+
+      console.log('\u{1F916} Deep Agents Triage\n');
+      await runTriageSingle(config, triageIssueNumber);
       break;
     }
 

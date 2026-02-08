@@ -2,7 +2,9 @@ import fs from 'fs';
 import path from 'path';
 import type { Config } from './config.js';
 import { createDeepAgentWithGitHub } from './agent.js';
-import { CircuitBreakerError } from './github-tools.js';
+import { CircuitBreakerError, createGitHubClient } from './github-tools.js';
+import { runTriage } from './triage-agent.js';
+import type { TriageOutput } from './triage-agent.js';
 
 /**
  * Per-issue action tracking. Records which workflow steps have been
@@ -251,9 +253,45 @@ export function getMaxToolCalls(config: Config): number {
 }
 
 /**
- * Run a full poll cycle: fetch new issues, analyze, comment, branch, PR.
+ * Fetch issues from GitHub that are new/updated since the last poll.
+ * Returns formatted issue objects for triage.
  */
-export async function runPollCycle(config: Config, options: { noSave?: boolean; dryRun?: boolean; maxIssues?: number; maxToolCalls?: number } = {}): Promise<void> {
+async function fetchIssuesForPoll(
+  config: Config,
+  maxIssues: number,
+  sinceDate: string | null,
+): Promise<Array<{ number: number; title: string; body: string; labels: string[] }>> {
+  const { owner, repo, token } = config.github;
+  const octokit = createGitHubClient(token);
+
+  const params: Record<string, any> = {
+    owner,
+    repo,
+    state: 'open',
+    per_page: maxIssues,
+    sort: 'updated',
+    direction: 'desc',
+  };
+  if (sinceDate) params.since = sinceDate;
+
+  const { data: issues } = await octokit.rest.issues.listForRepo(params);
+
+  return issues.map((issue: any) => ({
+    number: issue.number,
+    title: issue.title,
+    body: issue.body || '(no description)',
+    labels: issue.labels.map((l: any) => typeof l === 'string' ? l : l.name ?? ''),
+  }));
+}
+
+/**
+ * Run a full poll cycle: fetch new issues, triage, analyze, comment, branch, PR.
+ *
+ * The triage agent pre-filters issues: only issues where shouldAnalyze=true
+ * get passed to the full analysis agent. This saves cost on issues that
+ * don't need deep analysis (questions, duplicates, too vague, etc.).
+ */
+export async function runPollCycle(config: Config, options: { noSave?: boolean; dryRun?: boolean; maxIssues?: number; maxToolCalls?: number; skipTriage?: boolean } = {}): Promise<void> {
   const maxIssues = options.maxIssues ?? getMaxIssues(config);
   const maxToolCalls = options.maxToolCalls ?? getMaxToolCalls(config);
   // Dry run implies no-save (never persist state when skipping writes)
@@ -287,6 +325,87 @@ export async function runPollCycle(config: Config, options: { noSave?: boolean; 
     console.log('\u{1F195} First poll run -- no previous state found.\n');
   }
 
+  // ── Triage phase ────────────────────────────────────────────────────────
+  // Fetch issues and run triage on each to determine which need full analysis.
+  // Issues where shouldAnalyze=false are skipped (logged but not analyzed).
+
+  const previousIssueNumbers = pollState?.lastPollIssueNumbers ?? [];
+
+  if (!options.skipTriage) {
+    console.log('\u{1F50E} Fetching issues for triage...');
+    const issues = await fetchIssuesForPoll(config, maxIssues, sinceDate);
+
+    // Filter out previously processed issues
+    const newIssues = issues.filter((i) => !previousIssueNumbers.includes(i.number));
+
+    if (newIssues.length === 0) {
+      console.log('\u{2705} No new issues to process.\n');
+
+      if (!skipSave) {
+        savePollState({
+          lastPollTimestamp: new Date().toISOString(),
+          lastPollIssueNumbers: previousIssueNumbers,
+          issues: pollState?.issues ?? {},
+        });
+        console.log(`\u{1F4BE} Poll state saved to ${POLL_STATE_FILE}`);
+      }
+      return;
+    }
+
+    console.log(`\u{1F4CB} Found ${newIssues.length} new issue(s) to triage.\n`);
+
+    // Run triage on each new issue
+    const triageResults: Array<{ issue: typeof newIssues[0]; triage: TriageOutput }> = [];
+    for (const issue of newIssues) {
+      console.log(`\u{1F50E} Triaging issue #${issue.number}: ${issue.title}`);
+      try {
+        const triageResult = await runTriage(config, issue);
+        triageResults.push({ issue, triage: triageResult });
+        console.log(`   -> ${triageResult.issueType} | ${triageResult.complexity} | analyze: ${triageResult.shouldAnalyze}`);
+        if (!triageResult.shouldAnalyze) {
+          console.log(`   -> Skipping: ${triageResult.skipReason || 'no reason given'}`);
+        }
+      } catch (error) {
+        console.log(`   -> Triage failed for #${issue.number}, defaulting to full analysis: ${error}`);
+        triageResults.push({
+          issue,
+          triage: {
+            issueType: 'unknown',
+            complexity: 'moderate',
+            relevantFiles: [],
+            shouldAnalyze: true,
+            summary: 'Triage failed. Defaulting to full analysis.',
+          },
+        });
+      }
+    }
+
+    // Filter to issues that need analysis
+    const toAnalyze = triageResults.filter((r) => r.triage.shouldAnalyze);
+    const skipped = triageResults.filter((r) => !r.triage.shouldAnalyze);
+
+    console.log(`\n\u{1F4CA} Triage summary: ${toAnalyze.length} to analyze, ${skipped.length} skipped\n`);
+
+    if (toAnalyze.length === 0) {
+      console.log('\u{2705} All issues were skipped by triage. Nothing to analyze.\n');
+
+      // Still record the skipped issues as "processed" so we don't re-triage them
+      const allProcessed = [...previousIssueNumbers, ...triageResults.map((r) => r.issue.number)];
+
+      if (!skipSave) {
+        savePollState({
+          lastPollTimestamp: new Date().toISOString(),
+          lastPollIssueNumbers: allProcessed,
+          issues: pollState?.issues ?? {},
+        });
+        console.log(`\u{1F4BE} Poll state saved to ${POLL_STATE_FILE}`);
+      }
+      return;
+    }
+  }
+
+  // ── Analysis phase ──────────────────────────────────────────────────────
+
   // Create agent
   console.log('\u{2699}\uFE0F  Creating Deep Agent...');
   const agent = createDeepAgentWithGitHub(config, { maxIssues, dryRun: options.dryRun, maxToolCalls });
@@ -296,7 +415,7 @@ export async function runPollCycle(config: Config, options: { noSave?: boolean; 
   const userMessage = buildUserMessage(
     maxIssues,
     sinceDate,
-    pollState?.lastPollIssueNumbers ?? [],
+    previousIssueNumbers,
     pollState?.issues,
   );
 
@@ -336,7 +455,7 @@ export async function runPollCycle(config: Config, options: { noSave?: boolean; 
   // Extract and save poll state (including per-issue action tracking)
   const processedNumbers = extractProcessedIssues(
     result?.messages ?? [],
-    pollState?.lastPollIssueNumbers ?? [],
+    previousIssueNumbers,
   );
   const issueActions = extractIssueActions(
     result?.messages ?? [],
@@ -385,6 +504,65 @@ export async function runAnalyzeSingle(config: Config, issueNumber: number): Pro
   const lastMessage = result.messages[result.messages.length - 1];
   console.log('\u{1F4DD} Agent Response:');
   console.log(lastMessage.content);
+}
+
+/**
+ * Fetch a single issue from GitHub by number.
+ * Returns the issue in the format expected by the triage agent.
+ */
+export async function fetchSingleIssue(
+  config: Config,
+  issueNumber: number,
+): Promise<{ number: number; title: string; body: string; labels: string[] }> {
+  const { owner, repo, token } = config.github;
+  const octokit = createGitHubClient(token);
+
+  const { data: issue } = await octokit.rest.issues.get({
+    owner,
+    repo,
+    issue_number: issueNumber,
+  });
+
+  return {
+    number: issue.number,
+    title: issue.title,
+    body: issue.body || '(no description)',
+    labels: issue.labels.map((l) => typeof l === 'string' ? l : l.name ?? ''),
+  };
+}
+
+/**
+ * Run triage on a single issue and print the structured result.
+ */
+export async function runTriageSingle(config: Config, issueNumber: number): Promise<TriageOutput> {
+  console.log(`\u{2705} Config loaded: ${config.github.owner}/${config.github.repo}`);
+  console.log(`\u{1F50E} Triaging issue #${issueNumber}\n`);
+
+  // Fetch the issue from GitHub
+  const issue = await fetchSingleIssue(config, issueNumber);
+  console.log(`\u{1F4CB} Issue: ${issue.title}`);
+  console.log(`   Labels: ${issue.labels.length > 0 ? issue.labels.join(', ') : 'none'}\n`);
+
+  console.log('='.repeat(60));
+
+  // Run triage
+  const triageResult = await runTriage(config, issue);
+
+  console.log('='.repeat(60));
+  console.log('\n\u{2705} Triage completed!\n');
+
+  // Print structured output
+  console.log('\u{1F4CB} Triage Result:');
+  console.log(`   Issue Type:     ${triageResult.issueType}`);
+  console.log(`   Complexity:     ${triageResult.complexity}`);
+  console.log(`   Should Analyze: ${triageResult.shouldAnalyze}`);
+  if (triageResult.skipReason) {
+    console.log(`   Skip Reason:    ${triageResult.skipReason}`);
+  }
+  console.log(`   Relevant Files: ${triageResult.relevantFiles.length > 0 ? triageResult.relevantFiles.join(', ') : 'none'}`);
+  console.log(`   Summary:        ${triageResult.summary}`);
+
+  return triageResult;
 }
 
 /**

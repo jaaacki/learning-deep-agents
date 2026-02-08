@@ -27,6 +27,18 @@ export function loadConfig() {
     process.exit(1);
   }
 
+  // Validate triageLlm if present (optional -- falls back to main llm)
+  if (config.triageLlm) {
+    if (!config.triageLlm.provider) {
+      console.error('❌ triageLlm.provider is required when triageLlm is specified');
+      process.exit(1);
+    }
+    if (!config.triageLlm.apiKey && !localProviders.includes(config.triageLlm.provider)) {
+      console.error('❌ Missing triageLlm API key');
+      process.exit(1);
+    }
+  }
+
   return config;
 }
 

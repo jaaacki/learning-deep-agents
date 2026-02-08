@@ -1,5 +1,6 @@
 import { ChatAnthropic } from '@langchain/anthropic';
 import { ChatOpenAI } from '@langchain/openai';
+import { ChatOllama } from '@langchain/ollama';
 import type { Config } from './config.js';
 
 /**
@@ -39,10 +40,9 @@ export function createModel(config: Config) {
       });
 
     case 'ollama':
-      return new ChatOpenAI({
-        apiKey: 'ollama',
+      return new ChatOllama({
         model: model || 'llama3',
-        configuration: { baseURL: baseUrl || 'http://localhost:11434/v1' },
+        baseUrl: baseUrl?.replace(/\/v1\/?$/, '') || 'http://localhost:11434',
       });
 
     default:

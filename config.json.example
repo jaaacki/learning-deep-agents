@@ -10,6 +10,7 @@
     "model": "claude-sonnet-4-20250514",
     "baseUrl": null
   },
+  "triageLlm": null,
   "maxIssuesPerRun": 5,
   "maxToolCallsPerRun": 30
 }
