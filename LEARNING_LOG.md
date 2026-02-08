@@ -4508,3 +4508,43 @@ The enriched format is a superset. Old consumers that don't understand the new f
 - **Retraction:** Delete comments by ID, revert files by SHA, close PRs by number
 - **Audit trail:** Full provenance of every action the agent took
 - **Resumption with context:** The agent knows exactly what was committed, not just that "a branch exists"
+
+---
+
+## Entry 34: Critic's Batch 1 Post-Implementation Review -- 5 Parallel PRs
+
+**Date:** 2026-02-08
+**Author:** Critic Agent
+**Builds on:** Entry 27 (Cross-Phase Parallelism), Entry 28 (Pre-Implementation Constraint Review)
+
+### What was reviewed
+
+Five parallel PRs from Batch 1: #35 (logging), #36 (webhook), #37 (shutdown), #38 (retry), #39 (metadata). Each PR was reviewed for: issue requirement compliance, parallel constraint adherence, merge conflict risk, test quality, and cross-PR interactions.
+
+### Constraint compliance: all pass
+
+The two hard constraints from the pre-implementation review were honored:
+1. **#33 (logging) must use tool-layer wrapping only** -- PASS. `wrapWithLogging()` in `src/logger.ts`, applied in `agent.ts`. Zero modifications to `create*Tool()` function bodies.
+2. **#22 (shutdown) must not touch listener.ts** -- PASS. Changes scoped to `core.ts`, `index.ts`, `cli.ts` only.
+
+### Cross-PR merge issues discovered
+
+**LEARNING_LOG entry number collisions.** All 5 PRs append entries after Entry 26 (the last on main), but use overlapping numbers. Entry 27 was claimed by #38 (retry) but already existed on main. Entry 29 was claimed by both #35 (logging) and #37 (shutdown) with DIFFERENT content.
+
+**Resolution applied by team lead:** Entries renumbered at merge time: 29 (logging), 30 (retry), 31 (webhook), 32 (shutdown), 33 (metadata).
+
+### Implementation quality highlights
+
+- **Best:** #38 (retry) -- clean utility module, correct error classification, 18 thorough tests with fake timers
+- **Best design:** #35 (logging) -- composable middleware pattern, read-only counter sharing, separation of concerns
+- **Most complex:** #39 (metadata) -- pending-state correlation, three-generation migration, 12 metadata tests
+- **Most isolated:** #36 (webhook) -- entirely new subsystem, HMAC verification, factory pattern for testability
+- **Simplest:** #37 (shutdown) -- flag + checkpoints, `process.exitCode` over `process.exit()`
+
+### What this teaches about parallel development
+
+**Entry number collisions are the append-only file problem.** When N builders independently append to the same file, they all claim the "next" entry number. This is structurally identical to a last-write-wins race condition. Mitigation: assign entry numbers before builders start, or use a merge coordinator who renumbers at integration time.
+
+**Cross-branch contamination spreads silently.** Two builders (#36, #37) started from branches that included other builders' work, creating duplicate content. Mitigation: all parallel builders should branch from the same base commit (main), not from each other.
+
+**The compositional architecture paid off.** The wrapping stack (retry inside, circuit breaker middle, logging outside) allowed three separate builders to work on overlapping concerns without code conflicts. The Decorator pattern established in Phase 2 made Phase 5 parallelism possible. Good architecture is not just about the current feature -- it is about what it enables next.
