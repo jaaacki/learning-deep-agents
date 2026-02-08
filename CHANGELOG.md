@@ -1,5 +1,17 @@
 # Changelog
 
+## v0.1.1 — 2026-02-08
+
+### Added
+- **Multi-provider LLM support** via new `src/model.ts` — supports Anthropic, OpenAI, Ollama, and any OpenAI-compatible API
+- `baseUrl` config field for custom API endpoints (LM Studio, Together, Groq, etc.)
+- Ollama shorthand provider — defaults to `localhost:11434/v1`
+- API key validation skips local providers (ollama, openai-compatible)
+
+### Changed
+- Extracted model creation from `agent.ts` into dedicated `model.ts`
+- Updated `config.json.example` with `baseUrl` field
+
 ## v0.1.0 — 2026-02-08
 
 Initial release: cron-based GitHub issue poller with AI analysis.

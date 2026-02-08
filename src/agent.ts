@@ -1,6 +1,6 @@
 import { createDeepAgent } from 'deepagents';
-import { ChatAnthropic } from '@langchain/anthropic';
 import type { Config } from './config.js';
+import { createModel } from './model.js';
 import {
   createGitHubClient,
   createGitHubIssuesTool,
@@ -13,20 +13,7 @@ import {
  * Create the Deep Agent with GitHub integration
  */
 export function createDeepAgentWithGitHub(config: Config) {
-  // Select LLM based on provider
-  let model;
-  if (config.llm.provider === 'anthropic') {
-    model = new ChatAnthropic({
-      apiKey: config.llm.apiKey,
-      model: config.llm.model || 'claude-sonnet-4-20250514',
-    });
-  } else if (config.llm.provider === 'openai') {
-    // You can uncomment this line if using OpenAI
-    // model = new ChatOpenAI({ apiKey: config.llm.apiKey, model: config.llm.model || 'gpt-4' });
-    throw new Error('OpenAI provider not enabled - install @langchain/openai');
-  } else {
-    throw new Error(`Unsupported provider: ${config.llm}`);
-  }
+  const model = createModel(config);
 
   const { owner, repo, token } = config.github;
 

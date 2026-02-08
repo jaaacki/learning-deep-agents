@@ -20,7 +20,9 @@ export function loadConfig() {
     process.exit(1);
   }
 
-  if (!config.llm.apiKey) {
+  // API key is required for cloud providers, optional for local (ollama, openai-compatible)
+  const localProviders = ['ollama', 'openai-compatible'];
+  if (!config.llm.apiKey && !localProviders.includes(config.llm.provider)) {
     console.error('❌ Missing LLM API key');
     process.exit(1);
   }
