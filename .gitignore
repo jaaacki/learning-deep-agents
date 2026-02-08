@@ -1,0 +1,4 @@
+node_modules/
+config.json
+last_poll.json
+poll.log
