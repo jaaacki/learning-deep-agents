@@ -75,11 +75,11 @@ An autonomous bot that watches a GitHub repository, analyzes new issues with AI,
 
 | # | Issue | Status |
 |---|-------|--------|
-| [#17](../../issues/17) | Error handling with retry and backoff | Open |
-| [#22](../../issues/22) | Graceful shutdown (SIGTERM handling) | Open |
-| [#31](../../issues/31) | Enrich action tracking with full response metadata | Open |
+| [#17](../../issues/17) | Error handling with retry and backoff | ✓ v0.3.4 |
+| [#22](../../issues/22) | Graceful shutdown (SIGTERM handling) | ✓ v0.3.6 |
+| [#31](../../issues/31) | Enrich action tracking with full response metadata | ✓ v0.3.7 |
 | [#32](../../issues/32) | Retract command (`deepagents retract --issue N`) | Open |
-| [#33](../../issues/33) | Structured logging (tool calls, timing, workflow steps) | Open |
+| [#33](../../issues/33) | Structured logging (tool calls, timing, workflow steps) | ✓ v0.3.3 |
 
 **Milestone:** Transient API failures are retried. Container stops don't lose work. Agent actions can be retracted by humans via CLI. Tool calls are logged with arguments and timing.
 
@@ -91,7 +91,7 @@ An autonomous bot that watches a GitHub repository, analyzes new issues with AI,
 
 | # | Issue | Status |
 |---|-------|--------|
-| [#12](../../issues/12) | HTTP webhook listener | Open |
+| [#12](../../issues/12) | HTTP webhook listener | ✓ v0.3.5 |
 | [#13](../../issues/13) | Handle `issues.opened` event | Open |
 | [#14](../../issues/14) | Handle `pull_request.opened` event | Open |
 | [#18](../../issues/18) | Persistent job queue (PostgreSQL) | Open |
