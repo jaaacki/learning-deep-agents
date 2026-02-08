@@ -10,47 +10,49 @@ An autonomous bot that watches a GitHub repository, analyzes new issues with AI,
 
 ---
 
-## Phase 1 — Code Awareness
+## Phase 1 — Code Awareness ✓ (v0.2.0)
 
 > The agent can read the actual codebase, not just issue descriptions.
 
 | # | Issue | Status |
 |---|-------|--------|
-| [#1](../../issues/1) | Add `list_repo_files` tool (repo map) | Open |
-| [#2](../../issues/2) | Add `read_repo_file` tool (code reading) | Open |
+| [#1](../../issues/1) | Add `list_repo_files` tool (repo map) | ✓ v0.1.2 |
+| [#2](../../issues/2) | Add `read_repo_file` tool (code reading) | ✓ v0.1.3 |
 
 **Milestone:** Agent reads relevant source files when analyzing an issue. Analysis quality jumps from guessing to code-aware.
 
 ---
 
-## Phase 2 — Safety & Idempotency
+## Phase 2 — Safety & Idempotency ✓ (v0.3.0)
 
 > The bot can run unattended without spamming, duplicating, or going rogue.
 
 | # | Issue | Status |
 |---|-------|--------|
-| [#5](../../issues/5) | Max issues per run | Open |
-| [#8](../../issues/8) | Prevent duplicate comments | Open |
-| [#9](../../issues/9) | Prevent duplicate branches | Open |
-| [#10](../../issues/10) | Prevent duplicate PRs | Open |
-| [#11](../../issues/11) | Track actions per issue in poll state | Open |
-| [#6](../../issues/6) | Circuit breaker (max tool calls) | Open |
-| [#7](../../issues/7) | Dry run mode | Open |
+| [#5](../../issues/5) | Max issues per run | ✓ v0.2.1 |
+| [#8](../../issues/8) | Prevent duplicate comments | ✓ v0.2.2 |
+| [#9](../../issues/9) | Prevent duplicate branches | ✓ v0.2.3 |
+| [#10](../../issues/10) | Prevent duplicate PRs | ✓ v0.2.4 |
+| [#11](../../issues/11) | Track actions per issue in poll state | ✓ v0.2.10 |
+| [#6](../../issues/6) | Circuit breaker (max tool calls) | ✓ v0.2.9 |
+| [#7](../../issues/7) | Dry run mode | ✓ v0.2.8 |
 
 **Milestone:** Safe to run on a real repo via cron. Idempotent operations, bounded resource usage, testable without side effects.
 
 ---
 
-## Phase 3 — CLI & Testing
+## Phase 3 — CLI & Testing ✓ (v0.3.0)
 
 > Developer experience: test, debug, and operate the bot from the command line.
 
 | # | Issue | Status |
 |---|-------|--------|
-| [#24](../../issues/24) | CLI wrapper (poll, analyze, dry-run, status, webhook) | Open |
-| [#23](../../issues/23) | Test infrastructure (vitest, mocks, unit tests) | Open |
+| [#24](../../issues/24) | CLI wrapper (poll, analyze, dry-run, status, webhook) | ✓ v0.2.5 |
+| [#23](../../issues/23) | Test infrastructure (vitest, mocks, unit tests) | ✓ v0.2.6 |
+| [#25](../../issues/25) | `create_or_update_file` tool (commit to branches) | ✓ v0.3.1 |
+| [#27](../../issues/27) | Self-review step (catch hallucinated code) | ✓ v0.3.1 |
 
-**Milestone:** `deepagents poll`, `deepagents analyze --issue 5`, `deepagents dry-run` all work. Tests cover core logic with mocked APIs.
+**Milestone:** `deepagents poll`, `deepagents analyze --issue 5`, `deepagents dry-run` all work. Tests cover core logic with mocked APIs. Agent commits real code to branches and self-reviews before opening PRs.
 
 ---
 
