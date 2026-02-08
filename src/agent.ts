@@ -9,12 +9,17 @@ import {
   createPullRequestTool,
   createListRepoFilesTool,
   createReadRepoFileTool,
+  createDryRunCommentTool,
+  createDryRunBranchTool,
+  createDryRunPullRequestTool,
+  ToolCallCounter,
+  wrapWithCircuitBreaker,
 } from './github-tools.js';
 
 /**
  * Create the Deep Agent with GitHub integration
  */
-export function createDeepAgentWithGitHub(config: Config) {
+export function createDeepAgentWithGitHub(config: Config, options: { maxIssues?: number; dryRun?: boolean; maxToolCalls?: number } = {}) {
   const model = createModel(config);
 
   const { owner, repo, token } = config.github;
@@ -22,13 +27,26 @@ export function createDeepAgentWithGitHub(config: Config) {
   // Create one shared Octokit client for all tools
   const octokit = createGitHubClient(token);
 
-  // Create all GitHub tools with the shared client
-  const githubIssuesTool = createGitHubIssuesTool(owner, repo, octokit);
-  const commentTool = createCommentOnIssueTool(owner, repo, octokit);
-  const branchTool = createBranchTool(owner, repo, octokit);
-  const prTool = createPullRequestTool(owner, repo, octokit);
-  const listFilesTool = createListRepoFilesTool(owner, repo, octokit);
-  const readFileTool = createReadRepoFileTool(owner, repo, octokit);
+  // Read-only tools always use real implementations
+  let githubIssuesTool = createGitHubIssuesTool(owner, repo, octokit, options.maxIssues);
+  let listFilesTool = createListRepoFilesTool(owner, repo, octokit);
+  let readFileTool = createReadRepoFileTool(owner, repo, octokit);
+
+  // Write tools: swap to dry-run stubs when --dry-run is active
+  let commentTool = options.dryRun ? createDryRunCommentTool() : createCommentOnIssueTool(owner, repo, octokit);
+  let branchTool = options.dryRun ? createDryRunBranchTool() : createBranchTool(owner, repo, octokit);
+  let prTool = options.dryRun ? createDryRunPullRequestTool() : createPullRequestTool(owner, repo, octokit);
+
+  // Circuit breaker: wrap all tools with a shared call counter
+  if (options.maxToolCalls) {
+    const counter = new ToolCallCounter(options.maxToolCalls);
+    githubIssuesTool = wrapWithCircuitBreaker(githubIssuesTool, counter);
+    listFilesTool = wrapWithCircuitBreaker(listFilesTool, counter);
+    readFileTool = wrapWithCircuitBreaker(readFileTool, counter);
+    commentTool = wrapWithCircuitBreaker(commentTool, counter);
+    branchTool = wrapWithCircuitBreaker(branchTool, counter);
+    prTool = wrapWithCircuitBreaker(prTool, counter);
+  }
 
   // System prompt - full workflow instructions
   const systemPrompt = `You are a GitHub issue analysis agent for the repository ${owner}/${repo}.

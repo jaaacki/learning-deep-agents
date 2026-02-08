@@ -9,6 +9,53 @@
 
 ---
 
+## v0.2.10 — 2026-02-08
+
+### Added
+- **Per-issue action tracking** (Issue #11) — poll state now records which workflow steps completed per issue
+- `IssueActions` interface: `{ commented, branch, pr }` per issue number
+- `extractIssueActions()` scans agent tool calls to build action records
+- `migratePollState()` upgrades old poll state format (no `issues` field) to new format
+- Agent message includes partially-processed issue status so it can resume incomplete work
+- `deepagents status` now shows per-issue action breakdown
+
+### Changed
+- `PollState` interface adds optional `issues` field (backwards-compatible)
+- `buildUserMessage()` accepts optional `issueActions` parameter
+- `showStatus()` displays per-issue action details and maxToolCallsPerRun
+
+## v0.2.9 — 2026-02-08
+
+### Added
+- **Circuit breaker** (Issue #6) — caps total tool calls per agent run to prevent runaway loops
+- `maxToolCallsPerRun` config option (default: 30)
+- `--max-tool-calls N` CLI flag to override at runtime
+- `ToolCallCounter` class with shared counter across all tools
+- `wrapWithCircuitBreaker()` utility wraps any LangChain tool with counting
+- `CircuitBreakerError` custom error class with `callCount` and `callLimit` properties
+- Agent saves poll state before exiting on circuit break (partially-processed issues are preserved)
+- Process exits with code 2 when circuit breaker trips (distinguishable from normal errors)
+
+## v0.2.8 — 2026-02-08
+
+### Added
+- **True dry-run mode** (Issue #7) — `--dry-run` flag skips all GitHub write operations
+- Dry-run tool wrappers for `comment_on_issue`, `create_branch`, `create_pull_request`
+- Write tools log what they WOULD do and return fake success (`{ dry_run: true }`)
+- Read tools (`fetch_github_issues`, `list_repo_files`, `read_repo_file`) still execute normally
+- Local file writes (`write_file` for `./issues/`) still execute normally
+- Poll state is NOT saved in dry-run mode
+
+### Changed
+- `--no-save` and `--dry-run` are now separate flags (`--dry-run` implies `--no-save`)
+- `runPollCycle` options split into `noSave` (skip state save) and `dryRun` (skip GitHub writes + state save)
+
+## v0.2.7 — 2026-02-08
+
+### Changed
+- **Cron lock file** — `poll.sh` now uses `mkdir`-based lock to prevent overlapping cron runs
+- **maxIssuesPerRun enforced in tool** — `fetch_github_issues` now clamps the `limit` parameter to `maxIssuesPerRun` at the code level, not just in the prompt
+
 ## v0.2.6 — 2026-02-08
 
 ### Added

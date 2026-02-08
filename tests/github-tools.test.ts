@@ -6,6 +6,12 @@ import {
   createGitHubIssuesTool,
   createListRepoFilesTool,
   createReadRepoFileTool,
+  createDryRunCommentTool,
+  createDryRunBranchTool,
+  createDryRunPullRequestTool,
+  ToolCallCounter,
+  CircuitBreakerError,
+  wrapWithCircuitBreaker,
 } from '../src/github-tools.js';
 
 /**
@@ -260,6 +266,38 @@ describe('createGitHubIssuesTool', () => {
     expect(result).toContain('Error fetching issues');
     expect(result).toContain('API rate limited');
   });
+
+  it('clamps limit to maxIssues when maxIssues is provided', async () => {
+    octokit.rest.issues.listForRepo.mockResolvedValue({ data: [] });
+
+    // maxIssues = 3, but agent requests limit = 10 → clamped to 3
+    const toolFn = createGitHubIssuesTool('owner', 'repo', octokit, 3);
+    await toolFn.invoke({ state: 'open', limit: 10 });
+
+    const callArgs = octokit.rest.issues.listForRepo.mock.calls[0][0];
+    expect(callArgs.per_page).toBe(3);
+  });
+
+  it('keeps limit when it is below maxIssues', async () => {
+    octokit.rest.issues.listForRepo.mockResolvedValue({ data: [] });
+
+    // maxIssues = 10, agent requests limit = 3 → stays at 3
+    const toolFn = createGitHubIssuesTool('owner', 'repo', octokit, 10);
+    await toolFn.invoke({ state: 'open', limit: 3 });
+
+    const callArgs = octokit.rest.issues.listForRepo.mock.calls[0][0];
+    expect(callArgs.per_page).toBe(3);
+  });
+
+  it('does not clamp when maxIssues is not provided', async () => {
+    octokit.rest.issues.listForRepo.mockResolvedValue({ data: [] });
+
+    const toolFn = createGitHubIssuesTool('owner', 'repo', octokit);
+    await toolFn.invoke({ state: 'open', limit: 20 });
+
+    const callArgs = octokit.rest.issues.listForRepo.mock.calls[0][0];
+    expect(callArgs.per_page).toBe(20);
+  });
 });
 
 // ── Read repo file (truncation) ───────────────────────────────────────────────
@@ -323,5 +361,130 @@ describe('createReadRepoFileTool', () => {
     const result = await toolFn.invoke({ path: 'src' });
 
     expect(result).toContain('directory');
+  });
+});
+
+// ── Dry-run tool wrappers ───────────────────────────────────────────────────
+
+describe('createDryRunCommentTool', () => {
+  it('returns dry_run result without making API calls', async () => {
+    const toolFn = createDryRunCommentTool();
+    const result = JSON.parse(await toolFn.invoke({ issue_number: 1, body: 'Test analysis' }));
+
+    expect(result.dry_run).toBe(true);
+    expect(result.id).toBe(0);
+    expect(result.html_url).toContain('issue #1');
+  });
+
+  it('has the same tool name as the real tool', () => {
+    const toolFn = createDryRunCommentTool();
+    expect(toolFn.name).toBe('comment_on_issue');
+  });
+});
+
+describe('createDryRunBranchTool', () => {
+  it('returns dry_run result without making API calls', async () => {
+    const toolFn = createDryRunBranchTool();
+    const result = JSON.parse(await toolFn.invoke({ branch_name: 'issue-5-test' }));
+
+    expect(result.dry_run).toBe(true);
+    expect(result.branch).toBe('issue-5-test');
+    expect(result.sha).toBe('0000000000000000000000000000000000000000');
+  });
+
+  it('has the same tool name as the real tool', () => {
+    const toolFn = createDryRunBranchTool();
+    expect(toolFn.name).toBe('create_branch');
+  });
+});
+
+describe('createDryRunPullRequestTool', () => {
+  it('returns dry_run result without making API calls', async () => {
+    const toolFn = createDryRunPullRequestTool();
+    const result = JSON.parse(await toolFn.invoke({
+      title: 'Fix #5: Test',
+      body: 'Closes #5',
+      head: 'issue-5-test',
+    }));
+
+    expect(result.dry_run).toBe(true);
+    expect(result.number).toBe(0);
+    expect(result.draft).toBe(true);
+  });
+
+  it('has the same tool name as the real tool', () => {
+    const toolFn = createDryRunPullRequestTool();
+    expect(toolFn.name).toBe('create_pull_request');
+  });
+});
+
+// ── Circuit breaker ─────────────────────────────────────────────────────────
+
+describe('ToolCallCounter', () => {
+  it('increments count on each call', () => {
+    const counter = new ToolCallCounter(5);
+    counter.increment('tool_a');
+    counter.increment('tool_b');
+    expect(counter.getCount()).toBe(2);
+  });
+
+  it('allows calls up to the limit', () => {
+    const counter = new ToolCallCounter(3);
+    expect(() => counter.increment('a')).not.toThrow();
+    expect(() => counter.increment('b')).not.toThrow();
+    expect(() => counter.increment('c')).not.toThrow();
+  });
+
+  it('throws CircuitBreakerError when limit is exceeded', () => {
+    const counter = new ToolCallCounter(2);
+    counter.increment('a');
+    counter.increment('b');
+    expect(() => counter.increment('c')).toThrow(CircuitBreakerError);
+  });
+
+  it('includes tool name and counts in error', () => {
+    const counter = new ToolCallCounter(1);
+    counter.increment('first');
+    try {
+      counter.increment('second');
+      expect.unreachable('should have thrown');
+    } catch (e) {
+      expect(e).toBeInstanceOf(CircuitBreakerError);
+      const err = e as CircuitBreakerError;
+      expect(err.callCount).toBe(2);
+      expect(err.callLimit).toBe(1);
+      expect(err.message).toContain('second');
+    }
+  });
+});
+
+describe('wrapWithCircuitBreaker', () => {
+  it('wraps a dry-run tool and counts calls', async () => {
+    const counter = new ToolCallCounter(10);
+    const tool = wrapWithCircuitBreaker(createDryRunBranchTool(), counter);
+
+    await tool.invoke({ branch_name: 'test-1' });
+    await tool.invoke({ branch_name: 'test-2' });
+
+    expect(counter.getCount()).toBe(2);
+  });
+
+  it('throws when limit exceeded via wrapped tool', async () => {
+    const counter = new ToolCallCounter(1);
+    const tool = wrapWithCircuitBreaker(createDryRunBranchTool(), counter);
+
+    await tool.invoke({ branch_name: 'ok' });
+    await expect(tool.invoke({ branch_name: 'too-many' })).rejects.toThrow(CircuitBreakerError);
+  });
+
+  it('shares counter across multiple wrapped tools', async () => {
+    const counter = new ToolCallCounter(2);
+    const branchTool = wrapWithCircuitBreaker(createDryRunBranchTool(), counter);
+    const commentTool = wrapWithCircuitBreaker(createDryRunCommentTool(), counter);
+
+    await branchTool.invoke({ branch_name: 'b1' });
+    await commentTool.invoke({ issue_number: 1, body: 'hello' });
+    // Third call should trip the breaker
+    await expect(branchTool.invoke({ branch_name: 'b2' })).rejects.toThrow(CircuitBreakerError);
   });
 });

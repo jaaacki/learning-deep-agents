@@ -3059,3 +3059,250 @@ The remaining Phase 2 issues (#6 circuit breaker, #7 dry run, #11 action trackin
 - Issue #6 (circuit breaker) is testable as a pure function that counts tool calls
 
 ---
+
+## Entry 18: Cron Lock File + maxIssuesPerRun Enforcement (Quick Fixes)
+
+**Date:** 2026-02-08
+**Author:** Builder Agent
+**Implements:** Remaining safety items from Critic/Architect review
+**Files changed:** `poll.sh`, `src/github-tools.ts`, `src/agent.ts`, `src/core.ts`, `tests/github-tools.test.ts`
+**Version:** 0.2.7
+
+### What we did
+
+Two small but important safety improvements that came from prior reviews.
+
+### Fix 1: Cron lock file (poll.sh)
+
+**Problem:** If `poll.sh` takes longer than the cron interval (e.g., 15 minutes), cron starts a second instance. Two agents running simultaneously against the same repo means duplicate comments, duplicate branches, and race conditions.
+
+**Solution:** Use `mkdir` as an atomic lock. `mkdir` fails atomically if the directory already exists (even on NFS), which makes it safer than file-based locks that require read-then-write.
+
+```bash
+LOCK_DIR="./poll.lock"
+if ! mkdir "$LOCK_DIR" 2>/dev/null; then
+  echo "=== Poll SKIPPED ... ===" >> "$LOG_FILE"
+  exit 0
+fi
+trap 'rmdir "$LOCK_DIR"' EXIT
+```
+
+**Why `mkdir` instead of a PID file?** PID files have a race condition: process A reads the file, process B reads the file, both see it's stale, both write their PID. `mkdir` is atomic at the filesystem level -- only one process can create a directory. The `trap ... EXIT` ensures cleanup even if the script crashes.
+
+**Teaching note:** `trap 'command' EXIT` runs when the shell exits for *any* reason (normal exit, error with `set -e`, signals). This is the shell equivalent of `try/finally`.
+
+### Fix 2: maxIssuesPerRun in the tool (code enforcement)
+
+**Problem:** The `maxIssuesPerRun` config only appeared in the agent's text prompt. The LLM could ignore it and pass `limit: 100` to `fetch_github_issues`, fetching far more issues than intended.
+
+**Solution:** Pass `maxIssues` into the tool constructor and clamp `limit` with `Math.min(limit, maxIssues)`.
+
+```typescript
+// Before: agent could request any limit
+per_page: limit
+
+// After: clamped to config maximum
+const effectiveLimit = maxIssues ? Math.min(limit, maxIssues) : limit;
+per_page: effectiveLimit
+```
+
+**The threading path:** `config.maxIssuesPerRun` -> `core.ts` resolves it -> passes to `createDeepAgentWithGitHub(config, { maxIssues })` -> passes to `createGitHubIssuesTool(owner, repo, octokit, maxIssues)`.
+
+**Teaching note:** This is a defense-in-depth pattern. The prompt says "limit: 5" and the code enforces it. Even if the LLM hallucinates a larger number, the tool silently clamps it. The prompt-level instruction is still useful because it saves API calls (the LLM won't even try to ask for 100), but the code-level cap is the real safety net.
+
+### Connection to next work
+
+These fixes close out quick safety items. The remaining Phase 2 work is the three feature issues: #7 (true dry run), #6 (circuit breaker), and #11 (action tracking).
+
+---
+
+## Entry 19: True Dry-Run Mode -- Swapping Tools at Construction Time (Issue #7)
+
+**Date:** 2026-02-08
+**Author:** Builder Agent
+**Implements:** Issue #7 (true dry run that skips GitHub writes)
+**Files changed:** `src/github-tools.ts`, `src/agent.ts`, `src/core.ts`, `src/cli.ts`, `tests/github-tools.test.ts`
+**Version:** 0.2.8
+
+### The problem
+
+The existing `--no-save` flag prevented poll state from being written, but it still executed all GitHub API calls (comments, branches, PRs). Users needed a way to test the full pipeline without touching their repository at all.
+
+### The design decision: tool swapping vs. runtime check
+
+There are two common approaches to dry-run in tool-based agents:
+
+**Option A: Runtime flag inside each tool**
+```typescript
+// Every tool checks a flag
+if (dryRun) { log("would do X"); return fake; }
+// then does the real thing
+```
+
+**Option B: Swap the entire tool at construction time**
+```typescript
+// Agent factory picks different tool implementations
+const commentTool = dryRun ? createDryRunCommentTool() : createCommentOnIssueTool(owner, repo, octokit);
+```
+
+We chose **Option B** because:
+1. **No `if` pollution** in the real tools. The production code paths stay clean and unchanged.
+2. **The LLM sees the same tool names.** The dry-run wrappers have the same `name` and `schema` as the real tools, so the agent's behavior is identical.
+3. **Testable in isolation.** Each dry-run wrapper can be tested without mocking Octokit.
+4. **Defense in depth.** The dry-run tool literally has no reference to the Octokit client. It *cannot* make API calls even if something goes wrong.
+
+### How the two flags work together
+
+```
+--dry-run   → skip GitHub writes + skip poll state save
+--no-save   → keep GitHub writes + skip poll state save
+(neither)   → everything runs normally
+```
+
+The `dryRun` flag implies `noSave` (implemented as `skipSave = options.noSave || options.dryRun`). This prevents a confusing state where a dry run creates no real artifacts but the poll state records those (phantom) issues as processed.
+
+### What the dry-run tool returns
+
+Each wrapper returns a JSON object with `dry_run: true` plus the same shape as the real tool's success response (with placeholder values). This is important because the agent's next steps may depend on the tool's return value -- for example, the PR creation step reads the branch name from the branch tool's response.
+
+```typescript
+// Real tool returns:  { branch: "issue-5-fix", sha: "abc123", url: "https://..." }
+// Dry-run returns:    { dry_run: true, branch: "issue-5-fix", sha: "000...0", url: "(dry-run) ..." }
+```
+
+### Teaching note: why tool names must match
+
+LangChain tools are registered by name. The agent's system prompt says "use `comment_on_issue`", and when the LLM emits a tool call, it uses that exact name. If the dry-run tool had a different name (like `dry_run_comment_on_issue`), the system prompt would need to change and the agent's behavior would diverge in dry-run mode -- defeating the purpose of a faithful dry run.
+
+### Connection to next work
+
+Circuit breaker (#6) is the next safety feature. It constrains the *quantity* of tool calls (not which tools run), so it operates at a different layer -- it counts calls across all tools rather than swapping implementations.
+
+---
+
+## Entry 20: Circuit Breaker -- Capping Tool Calls to Prevent Runaway Agents (Issue #6)
+
+**Date:** 2026-02-08
+**Author:** Builder Agent
+**Implements:** Issue #6 (circuit breaker / max tool calls per run)
+**Files changed:** `src/github-tools.ts`, `src/agent.ts`, `src/core.ts`, `src/cli.ts`, `tests/github-tools.test.ts`, `tests/core.test.ts`, `config.json.example`
+**Version:** 0.2.9
+
+### The problem
+
+LLM agents can enter loops. The ReAct pattern (think-act-observe) works well when the agent makes progress on each iteration, but sometimes the agent gets stuck retrying a failed tool call, or oscillates between two states. Without a hard limit, a looping agent burns unlimited API credits and makes unlimited GitHub API calls.
+
+### Design choices
+
+**Shared counter vs. per-tool counters:** We use a single `ToolCallCounter` instance shared across all tools. This counts *total* tool calls, not per-tool counts. The rationale: the danger is total cost and API abuse, not any single tool being called too often. A normal 5-issue run uses roughly 5 x (1 fetch + 2 reads + 1 comment + 1 branch + 1 PR) = 30 tool calls, so the default limit of 30 is tight but realistic.
+
+**Wrapper pattern vs. callback handler:** LangChain supports callback handlers that can intercept tool calls, but our tools are created by the `langchain` `tool()` function and passed to `deepagents`' `createDeepAgent()`. We don't control the agent loop's callback wiring. Instead, we wrap each tool's `invoke` method with a counter check -- simple, explicit, and testable.
+
+```typescript
+export function wrapWithCircuitBreaker<T>(wrappedTool: T, counter: ToolCallCounter): T {
+  const originalInvoke = wrappedTool.invoke.bind(wrappedTool);
+  wrappedTool.invoke = async (input, options) => {
+    counter.increment(wrappedTool.name);  // throws if over limit
+    return originalInvoke(input, options);
+  };
+  return wrappedTool;
+}
+```
+
+**Error handling strategy:** When `CircuitBreakerError` is thrown, `runPollCycle` catches it, saves poll state (so partially-processed issues are preserved), logs what happened, and exits with code 2. Exit code 2 distinguishes circuit breaker stops from normal errors (code 1) and success (code 0), which is useful for cron monitoring scripts.
+
+### The class design
+
+`ToolCallCounter` is a simple class with a `limit` and a `count`. It throws `CircuitBreakerError` (a custom Error subclass) when `count > limit`. The custom error class carries `callCount` and `callLimit` properties so the catch handler can report specifics.
+
+### Teaching note: why throw instead of return an error string?
+
+The existing tools use the "error string" pattern -- they catch errors and return an error message as a string. This works for recoverable tool failures (API errors, validation errors) because the LLM can read the error and decide what to do next.
+
+But the circuit breaker is fundamentally different: it *must* stop the agent. If we returned an error string, the LLM would just read "circuit breaker tripped" and try to continue. Throwing an exception breaks out of the agent's ReAct loop entirely, which is the correct behavior for a safety limit.
+
+### Connection to next work
+
+Action tracking (#11) is the last Phase 2 feature. It changes the poll state format to track which actions have been completed per issue, enabling the agent to resume partially-completed work.
+
+---
+
+## Entry 21: Per-Issue Action Tracking -- Resumable Workflows (Issue #11)
+
+**Date:** 2026-02-08
+**Author:** Builder Agent
+**Implements:** Issue #11 (action tracking per issue in poll state)
+**Files changed:** `src/core.ts`, `tests/core.test.ts`
+**Version:** 0.2.10
+
+### The problem
+
+The old poll state tracked only *which issue numbers* were processed, not *what was done for each one*. If the agent crashed (or hit the circuit breaker) mid-run, it had processed issue #5's comment and branch but not the PR. On the next run, the agent would see "#5 already processed" and skip it entirely -- leaving the PR forever uncreated.
+
+### The new state format
+
+```json
+{
+  "lastPollTimestamp": "2026-02-08T12:00:00Z",
+  "lastPollIssueNumbers": [1, 5],
+  "issues": {
+    "1": { "commented": true, "branch": "issue-1-fix-login", "pr": 7 },
+    "5": { "commented": true, "branch": "issue-5-add-tests", "pr": null }
+  }
+}
+```
+
+The `issues` field maps issue numbers (as strings, because JSON keys are always strings) to an `IssueActions` object tracking three workflow steps: comment, branch, and PR.
+
+### Backwards compatibility
+
+The `issues` field is optional. Old poll state files (no `issues` key) are detected by `migratePollState()` which creates stub entries:
+
+```typescript
+// Old format: { lastPollTimestamp, lastPollIssueNumbers: [1, 2] }
+// Migrated:   { ..., issues: { "1": { commented: true, branch: null, pr: null }, ... } }
+```
+
+We mark migrated issues as `commented: true` because the old code only recorded an issue as processed after commenting. The branch and PR status are unknown, so they're marked `null`.
+
+### How the agent uses action context
+
+`buildUserMessage()` now accepts an optional `issueActions` parameter. When partially-processed issues exist, it adds context to the agent prompt:
+
+```
+Partially-processed issues from previous runs (resume these first):
+  Issue #5: done=[commented, branch: issue-5-add-tests] remaining=[open PR]
+```
+
+This tells the agent to skip the comment and branch steps (they're idempotent anyway, but this saves API calls) and go straight to opening the PR.
+
+### Extracting actions from messages
+
+`extractIssueActions()` scans the agent's tool calls to build action records. It uses naming conventions to link actions to issues:
+
+- `comment_on_issue({ issue_number: 5 })` -> issue #5, commented
+- `create_branch({ branch_name: 'issue-5-fix' })` -> issue #5, branch (extracted from branch name pattern)
+- `create_pull_request({ head: 'issue-5-fix' })` -> issue #5, PR attempted
+
+The PR number itself comes from parsing the tool's JSON response (if available), since the `create_pull_request` call arguments don't include the PR number -- it's only known after creation.
+
+### Teaching note: why string keys?
+
+JSON object keys are always strings. Even though issue numbers are integers in our TypeScript code, they become `"5"` in the JSON file. We use `String(num)` when indexing into the `issues` map and accept this minor type mismatch because it's the natural representation in persisted JSON. The alternative (using a Map or an array of tuples) would complicate serialization.
+
+### Connection to next work
+
+This completes Phase 2 (Safety & Idempotency). All six Phase 2 issues are now implemented:
+- #5 maxIssuesPerRun (v0.2.1)
+- #8 idempotent comments (v0.2.2)
+- #9 idempotent branches (v0.2.3)
+- #10 idempotent PRs (v0.2.4)
+- #6 circuit breaker (v0.2.9)
+- #7 true dry run (v0.2.8)
+- #11 action tracking (v0.2.10)
+
+Plus the quick fixes: cron lock file and code-enforced maxIssuesPerRun (v0.2.7).
+
+Phase 3 (CLI & Testing) was completed earlier. The next milestone is Phase 4 (Intelligence).
+
+---

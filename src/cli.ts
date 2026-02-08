@@ -24,14 +24,17 @@ Commands:
   help              Show this help message
 
 Options for 'poll':
-  --no-save         Run without saving poll state (GitHub writes still execute)
-  --max-issues N    Override maxIssuesPerRun from config
+  --dry-run           Skip all GitHub writes (comments, branches, PRs) and poll state save
+  --no-save           Run without saving poll state (GitHub writes still execute)
+  --max-issues N      Override maxIssuesPerRun from config
+  --max-tool-calls N  Override maxToolCallsPerRun from config (circuit breaker)
 
 Options for 'analyze':
   --issue N         Issue number to analyze (required)
 
 Examples:
   deepagents poll
+  deepagents poll --dry-run
   deepagents poll --no-save
   deepagents poll --max-issues 3
   deepagents analyze --issue 42
@@ -46,10 +49,14 @@ function parseArgs(argv: string[]): { command: string; flags: Record<string, str
 
   for (let i = 1; i < args.length; i++) {
     const arg = args[i];
-    if (arg === '--no-save') {
+    if (arg === '--dry-run') {
+      flags['dry-run'] = true;
+    } else if (arg === '--no-save') {
       flags['no-save'] = true;
     } else if (arg === '--max-issues' && i + 1 < args.length) {
       flags['max-issues'] = args[++i];
+    } else if (arg === '--max-tool-calls' && i + 1 < args.length) {
+      flags['max-tool-calls'] = args[++i];
     } else if (arg === '--issue' && i + 1 < args.length) {
       flags['issue'] = args[++i];
     } else {
@@ -75,17 +82,25 @@ async function main() {
 
   switch (command) {
     case 'poll': {
-      const dryRun = flags['no-save'] === true;
+      const dryRun = flags['dry-run'] === true;
+      const noSave = flags['no-save'] === true;
       const maxIssuesStr = flags['max-issues'];
       const maxIssues = typeof maxIssuesStr === 'string' ? parseInt(maxIssuesStr, 10) : undefined;
+      const maxToolCallsStr = flags['max-tool-calls'];
+      const maxToolCalls = typeof maxToolCallsStr === 'string' ? parseInt(maxToolCallsStr, 10) : undefined;
 
       if (maxIssues !== undefined && (isNaN(maxIssues) || maxIssues < 1)) {
         console.error('--max-issues must be a positive integer');
         process.exit(1);
       }
 
+      if (maxToolCalls !== undefined && (isNaN(maxToolCalls) || maxToolCalls < 1)) {
+        console.error('--max-tool-calls must be a positive integer');
+        process.exit(1);
+      }
+
       console.log('\u{1F916} Deep Agents GitHub Issue Poller\n');
-      await runPollCycle(config, { dryRun, maxIssues });
+      await runPollCycle(config, { dryRun, noSave, maxIssues, maxToolCalls });
       break;
     }
 
@@ -111,7 +126,7 @@ async function main() {
     case 'no-save': {
       // Shorthand for `poll --no-save`
       console.log('\u{1F916} Deep Agents GitHub Issue Poller (No-Save Mode)\n');
-      await runPollCycle(config, { dryRun: true });
+      await runPollCycle(config, { noSave: true });
       break;
     }
 

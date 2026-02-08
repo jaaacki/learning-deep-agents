@@ -25,8 +25,11 @@ The project provides a CLI with subcommands:
 # Run a poll cycle (fetch + analyze + comment + branch + PR)
 npx deepagents poll
 
-# Poll without saving state (test run)
+# Dry run: skip GitHub writes (comments, branches, PRs) -- safe for testing
 npx deepagents poll --dry-run
+
+# No-save: run normally but don't persist poll state
+npx deepagents poll --no-save
 
 # Override max issues from config
 npx deepagents poll --max-issues 3
@@ -87,11 +90,14 @@ Edit `config.json`:
     "model": "claude-sonnet-4-20250514",
     "baseUrl": null
   },
-  "maxIssuesPerRun": 5
+  "maxIssuesPerRun": 5,
+  "maxToolCallsPerRun": 30
 }
 ```
 
 `maxIssuesPerRun` caps how many issues the agent processes per invocation (default: 5). Lower this for busy repos or higher LLM costs.
+
+`maxToolCallsPerRun` is a circuit breaker that caps total tool calls per run (default: 30). If the agent enters a loop, this stops it from burning unlimited API credits. The process exits with code 2 when tripped.
 
 #### Other LLM providers
 

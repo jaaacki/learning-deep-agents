@@ -2,6 +2,60 @@ import { Octokit } from 'octokit';
 import { tool } from 'langchain';
 import { z } from 'zod';
 
+// ── Circuit breaker ─────────────────────────────────────────────────────────
+
+/**
+ * Shared counter for circuit breaker. Tracks total tool calls across all tools
+ * in a single agent run and throws when the limit is exceeded.
+ */
+export class ToolCallCounter {
+  private count = 0;
+  constructor(readonly limit: number) {}
+
+  increment(toolName: string): void {
+    this.count++;
+    if (this.count > this.limit) {
+      throw new CircuitBreakerError(
+        `Circuit breaker tripped: ${this.count} tool calls exceeded limit of ${this.limit}. ` +
+        `Last tool: ${toolName}. Stopping agent to prevent runaway execution.`,
+        this.count,
+        this.limit,
+      );
+    }
+  }
+
+  getCount(): number {
+    return this.count;
+  }
+}
+
+export class CircuitBreakerError extends Error {
+  constructor(
+    message: string,
+    public readonly callCount: number,
+    public readonly callLimit: number,
+  ) {
+    super(message);
+    this.name = 'CircuitBreakerError';
+  }
+}
+
+/**
+ * Wrap a LangChain tool with circuit breaker counting.
+ * Returns a new tool with the same name/schema that increments the shared counter before each call.
+ */
+export function wrapWithCircuitBreaker<T extends ReturnType<typeof tool>>(
+  wrappedTool: T,
+  counter: ToolCallCounter,
+): T {
+  const originalInvoke = wrappedTool.invoke.bind(wrappedTool);
+  wrappedTool.invoke = async (input: any, options?: any) => {
+    counter.increment(wrappedTool.name);
+    return originalInvoke(input, options);
+  };
+  return wrappedTool;
+}
+
 /**
  * Create GitHub API client
  */
@@ -14,10 +68,13 @@ export function createGitHubClient(token: string) {
  * Accepts a shared Octokit client instead of creating its own.
  * Supports a 'since' parameter for polling (only return issues updated after a given date).
  */
-export function createGitHubIssuesTool(owner: string, repo: string, octokit: Octokit) {
+export function createGitHubIssuesTool(owner: string, repo: string, octokit: Octokit, maxIssues?: number) {
   return tool(
     async ({ state = 'open', limit = 5, since }: { state?: 'open' | 'closed' | 'all'; limit?: number; since?: string }) => {
       try {
+        // Enforce maxIssuesPerRun at the code level so the agent cannot exceed the cap
+        const effectiveLimit = maxIssues ? Math.min(limit, maxIssues) : limit;
+
         const sinceLabel = since ? ` updated since ${since}` : '';
         console.log(`\u{1F4E5} Fetching ${state} issues from ${owner}/${repo}${sinceLabel}...`);
 
@@ -25,7 +82,7 @@ export function createGitHubIssuesTool(owner: string, repo: string, octokit: Oct
           owner,
           repo,
           state,
-          per_page: limit,
+          per_page: effectiveLimit,
           sort: 'updated',
           direction: 'desc',
         };
@@ -408,6 +465,80 @@ export function createReadRepoFileTool(owner: string, repo: string, octokit: Oct
       schema: z.object({
         path: z.string().describe('Full path to the file in the repo (e.g., "src/index.ts", "README.md")'),
         branch: z.string().optional().default('main').describe('Branch to read from (default: main)'),
+      }),
+    }
+  );
+}
+
+// ── Dry-run wrappers ────────────────────────────────────────────────────────
+// These create replacement tools with the same name/schema as the real ones
+// but log what they WOULD do and return fake success results.
+
+export function createDryRunCommentTool() {
+  return tool(
+    async ({ issue_number, body }: { issue_number: number; body: string }) => {
+      const preview = body.length > 80 ? body.slice(0, 80) + '...' : body;
+      console.log(`DRY RUN -- would comment on issue #${issue_number}: ${preview}`);
+      return JSON.stringify({
+        dry_run: true,
+        id: 0,
+        html_url: `(dry-run) issue #${issue_number} comment`,
+        created_at: new Date().toISOString(),
+      });
+    },
+    {
+      name: 'comment_on_issue',
+      description: 'Post a comment on a GitHub issue. (DRY RUN MODE: will log but not execute)',
+      schema: z.object({
+        issue_number: z.number().describe('The issue number to comment on'),
+        body: z.string().describe('The comment body (Markdown supported)'),
+      }),
+    }
+  );
+}
+
+export function createDryRunBranchTool() {
+  return tool(
+    async ({ branch_name, from_branch = 'main' }: { branch_name: string; from_branch?: string }) => {
+      console.log(`DRY RUN -- would create branch '${branch_name}' from '${from_branch}'`);
+      return JSON.stringify({
+        dry_run: true,
+        branch: branch_name,
+        sha: '0000000000000000000000000000000000000000',
+        url: `(dry-run) branch ${branch_name}`,
+      });
+    },
+    {
+      name: 'create_branch',
+      description: 'Create a new Git branch in the repository. (DRY RUN MODE: will log but not execute)',
+      schema: z.object({
+        branch_name: z.string().describe('Name for the new branch'),
+        from_branch: z.string().optional().default('main').describe('Branch to create from (default: main)'),
+      }),
+    }
+  );
+}
+
+export function createDryRunPullRequestTool() {
+  return tool(
+    async ({ title, body, head, base = 'main' }: { title: string; body: string; head: string; base?: string }) => {
+      console.log(`DRY RUN -- would create draft PR '${title}' (${head} -> ${base})`);
+      return JSON.stringify({
+        dry_run: true,
+        number: 0,
+        html_url: `(dry-run) PR: ${title}`,
+        state: 'open',
+        draft: true,
+      });
+    },
+    {
+      name: 'create_pull_request',
+      description: 'Open a draft pull request. (DRY RUN MODE: will log but not execute)',
+      schema: z.object({
+        title: z.string().describe('PR title'),
+        body: z.string().describe('PR description'),
+        head: z.string().describe('The branch containing changes'),
+        base: z.string().optional().default('main').describe('The branch to merge into (default: main)'),
       }),
     }
   );
