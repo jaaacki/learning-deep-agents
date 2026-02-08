@@ -17,6 +17,39 @@ cron  -->  poll.sh  -->  npm start  -->  Agent runs
 
 The agent never merges PRs. It only proposes fixes as drafts.
 
+## CLI Usage
+
+The project provides a CLI with subcommands:
+
+```bash
+# Run a poll cycle (fetch + analyze + comment + branch + PR)
+npx deepagents poll
+
+# Poll without saving state (test run)
+npx deepagents poll --dry-run
+
+# Override max issues from config
+npx deepagents poll --max-issues 3
+
+# Analyze a single issue by number
+npx deepagents analyze --issue 42
+
+# Show current polling state
+npx deepagents status
+
+# Show help
+npx deepagents help
+```
+
+During development, use `npm run cli` instead of `npx`:
+
+```bash
+npm run cli -- poll --dry-run
+npm run cli -- analyze --issue 42
+```
+
+The original `npm start` still works and runs a single poll cycle (equivalent to `npx deepagents poll`).
+
 ## Prerequisites
 
 - Node.js 18+
@@ -171,16 +204,35 @@ Add this line (polls every 15 minutes):
 | Agent doesn't comment/create PR | Check console output for API errors; token might lack permissions |
 | `poll.sh: npm: command not found` | Uncomment the correct PATH line in `poll.sh` |
 
+## Testing
+
+```bash
+# Run all tests
+npm test
+
+# Run tests in watch mode (re-runs on file changes)
+npm run test:watch
+```
+
+Tests use [vitest](https://vitest.dev/) with mocked external dependencies (Octokit, LLM constructors, filesystem). No real API calls are made during testing.
+
 ## File Structure
 
 ```
 deepagents/
   src/
-    index.ts          -- Entry point, polling state management
+    cli.ts            -- CLI entry point (subcommands: poll, analyze, status)
+    core.ts           -- Shared logic (poll cycle, analyze, status, state management)
+    index.ts          -- Original entry point (thin wrapper, backwards-compatible)
     config.ts         -- Loads and validates config.json
     model.ts          -- LLM provider factory (Anthropic, OpenAI, Ollama, etc.)
     github-tools.ts   -- GitHub API tools (fetch, list files, comment, branch, PR)
     agent.ts          -- Creates the agent with tools + system prompt
+  tests/
+    core.test.ts      -- Unit tests for core logic (pure functions, state)
+    github-tools.test.ts -- Idempotency and tool tests (mocked Octokit)
+    model.test.ts     -- Provider routing tests (mocked LLM constructors)
+    config.test.ts    -- Config validation tests (mocked fs, process.exit)
   issues/             -- Generated: detailed analysis files
   config.json         -- Your credentials (git-ignored)
   config.json.example -- Template for config.json

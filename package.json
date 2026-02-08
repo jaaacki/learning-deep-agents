@@ -1,11 +1,17 @@
 {
   "name": "deepagents-github-test",
-  "version": "0.2.4",
+  "version": "0.2.6",
   "description": "Simple test to learn Deep Agents workflow with GitHub issues",
   "type": "module",
+  "bin": {
+    "deepagents": "./src/cli.ts"
+  },
   "scripts": {
     "start": "tsx src/index.ts",
-    "dev": "tsx watch src/index.ts"
+    "dev": "tsx watch src/index.ts",
+    "cli": "tsx src/cli.ts",
+    "test": "vitest run",
+    "test:watch": "vitest"
   },
   "dependencies": {
     "deepagents": "^0.1.0",
@@ -17,6 +23,7 @@
   },
   "devDependencies": {
     "tsx": "^4.7.0",
-    "@types/node": "^20.11.0"
+    "@types/node": "^20.11.0",
+    "vitest": "^3.0.0"
   }
 }

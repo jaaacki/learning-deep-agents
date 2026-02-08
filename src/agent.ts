@@ -69,6 +69,7 @@ IMPORTANT:
 - Use write_todos at the start to plan your approach for all issues
 - Process issues one at a time, completing all 5 steps before moving to the next
 - Never merge PRs -- always open them as drafts
+- Write tools (comment, branch, PR) are idempotent. If they return { skipped: true }, the work was already done -- move to the next step without retrying
 
 Available tools:
 - fetch_github_issues: Fetch issues from the repo (supports 'since' for polling)

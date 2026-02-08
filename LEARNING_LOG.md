@@ -2544,3 +2544,518 @@ Three Phase 2 issues remain: #6 (circuit breaker), #7 (dry run), #11 (action tra
 The cron lock file (Entry 7 Finding #6) should be included as a prerequisite or parallel task -- it complements the tool-level idempotency with infrastructure-level concurrency protection.
 
 ---
+
+## Entry 15: CLI Wrapper -- Separating Interface from Logic (Issue #24)
+
+**Date:** 2026-02-08
+**Author:** Builder Agent
+**Implements:** Issue #24 (CLI wrapper with subcommands)
+**Version:** v0.2.5
+**Files changed:** `src/cli.ts` (new), `src/core.ts` (new), `src/index.ts` (refactored), `package.json`
+
+### The problem
+
+Before this change, the project had a single entry point (`src/index.ts`) that mixed three concerns:
+1. **State management** -- loading/saving `last_poll.json`, extracting processed issue numbers
+2. **Orchestration** -- building user messages, creating the agent, invoking it
+3. **Interface** -- console output, startup logic, error handling
+
+This meant:
+- You could only run a full poll cycle. No way to analyze a single issue, check status, or do a dry run.
+- Adding features like `--dry-run` or `--max-issues` would require modifying the same monolithic function.
+- Testing any of the core logic required running the whole entry point.
+
+The Critic flagged two specific issues that a CLI would address:
+- **Finding #1 (Entry 14):** `maxIssuesPerRun` is prompt-only. The CLI can pass it as a validated parameter.
+- **Dry run mode (Entry 14):** Fits naturally as a CLI flag rather than a config option.
+
+### The architecture decision: extract, then wrap
+
+Rather than adding flags to `index.ts` and making it more complex, we split into three files:
+
+```
+src/core.ts    -- All reusable logic (the "library")
+src/cli.ts     -- CLI entry point (the "interface")
+src/index.ts   -- Original entry point (thin wrapper for backwards compatibility)
+```
+
+This is the **Extract-Wrap pattern**: take the logic out of the entry point, put it in a shared module, then create thin wrappers that call the shared module. Both `index.ts` and `cli.ts` call the same `runPollCycle()` function from `core.ts`.
+
+### What went into `core.ts`
+
+Every function that was in `index.ts` moved to `core.ts`, but with better interfaces:
+
+| Function | Purpose | Key design choice |
+|---|---|---|
+| `loadPollState()` | Read `last_poll.json` | Returns `null` if file does not exist (no exceptions) |
+| `savePollState()` | Write `last_poll.json` | Takes a `PollState` object, writes JSON |
+| `extractProcessedIssues()` | Parse issue numbers from agent messages | Accepts existing numbers to merge with (additive) |
+| `buildUserMessage()` | Build the prompt for a poll run | Takes maxIssues, sinceDate, previousIssues as parameters |
+| `buildAnalyzeMessage()` | Build the prompt for single-issue analysis | Takes issueNumber |
+| `getMaxIssues()` | Resolve effective max issues from config | Validates: `typeof raw === 'number' && raw > 0` (addresses Critic Finding #7) |
+| `runPollCycle()` | Full poll cycle | Accepts `options: { dryRun?, maxIssues? }` |
+| `runAnalyzeSingle()` | Analyze one issue | Takes config + issue number |
+| `showStatus()` | Print polling state | Read-only, no agent invocation |
+
+The key improvement: `getMaxIssues()` now validates the config value with a type check and positivity guard, falling back to `DEFAULT_MAX_ISSUES_PER_RUN` if the config is invalid. This directly addresses the Critic's Finding #7 from Entry 14.
+
+### What went into `cli.ts`
+
+The CLI uses manual `process.argv` parsing -- no external framework. This is a deliberate choice:
+
+**Why not Commander.js or yargs?**
+- They add dependencies for something achievable in ~60 lines
+- The project has 4 commands and 3 flags -- that is not enough complexity to justify a framework
+- Manual parsing teaches how CLIs actually work under the hood (this is a learning project)
+- Less indirection makes debugging easier
+
+The parser handles:
+- Positional command (`poll`, `analyze`, `status`, `help`)
+- Boolean flags (`--dry-run`)
+- Value flags (`--max-issues N`, `--issue N`)
+- Unknown option error with usage display
+
+The CLI also adds a `dry-run` shorthand command -- `deepagents dry-run` is equivalent to `deepagents poll --dry-run`. This is a convenience for the most common testing workflow.
+
+### The `bin` field and `npx`
+
+Adding `"bin": { "deepagents": "./src/cli.ts" }` to `package.json` means:
+- After `npm link`, you can run `deepagents poll` from anywhere
+- With `npx`, you can run `npx deepagents poll` without global install
+- The shebang (`#!/usr/bin/env node`) tells the OS to use Node.js
+
+In practice, during development you use `npm run cli -- poll --dry-run` (the `--` separates npm's flags from the script's flags). The `npx` form is for when the package is installed.
+
+### Backwards compatibility
+
+`src/index.ts` is now 20 lines. It imports `loadConfig` and `runPollCycle` from `core.ts` and calls them. This means:
+- `npm start` still works exactly as before
+- `npm run dev` (watch mode) still works
+- No existing workflow is broken
+- The new CLI is additive, not a replacement
+
+### What the Critic should check
+
+1. **Does `core.ts` properly handle all edge cases from `index.ts`?** The extraction should not have lost any error handling or state management logic.
+2. **Does the `--max-issues` validation in CLI match `getMaxIssues` in core?** The CLI validates the parsed integer (`isNaN || < 1`), and `getMaxIssues` validates the config value. Both paths are covered.
+3. **Is the `dry-run` shorthand confusing?** Having both `deepagents dry-run` and `deepagents poll --dry-run` mean the same thing might surprise users. But it is documented and the help message is clear.
+4. **Should `index.ts` pass `maxIssues` from config?** Currently `index.ts` calls `runPollCycle(config)` with no options, so it uses the config default. This matches the pre-CLI behavior.
+
+### Connection to next work
+
+The CLI architecture enables Task #14 (test infrastructure). With logic extracted into `core.ts`, we can unit test `buildUserMessage()`, `extractProcessedIssues()`, `getMaxIssues()`, and other pure functions without invoking the agent or touching the filesystem. The CLI also makes manual testing easier: `deepagents poll --dry-run` lets you verify the agent runs without writing poll state.
+
+---
+
+## Entry 16: Test Infrastructure -- What to Mock and Why (Issue #23)
+
+**Date:** 2026-02-08
+**Author:** Builder Agent
+**Implements:** Issue #23 (test infrastructure with vitest)
+**Version:** v0.2.6
+**Files added:** `vitest.config.ts`, `tests/core.test.ts`, `tests/github-tools.test.ts`, `tests/model.test.ts`, `tests/config.test.ts`
+**Files changed:** `package.json`
+
+### Why vitest?
+
+Three reasons:
+1. **ESM-native.** This project uses `"type": "module"` and ESM imports. Jest requires transforms and configuration to handle ESM. Vitest supports it out of the box.
+2. **Zero config for TypeScript.** Vitest uses esbuild internally, which handles `.ts` files without needing a separate compile step. No `ts-jest` or `babel` plugins needed.
+3. **Same API as Jest.** `describe`, `it`, `expect`, `vi.fn()`, `vi.mock()` -- the test API is nearly identical to Jest, so the knowledge transfers both ways.
+
+The config file (`vitest.config.ts`) is minimal -- it just tells vitest where to find test files:
+
+```typescript
+import { defineConfig } from 'vitest/config';
+export default defineConfig({
+  test: { include: ['tests/**/*.test.ts'] },
+});
+```
+
+### The test structure
+
+Four test files, one per source module. Each tests a different category of behavior:
+
+| Test file | Source file | What it tests | Mock strategy |
+|---|---|---|---|
+| `core.test.ts` | `core.ts` | Pure functions + state I/O | `vi.spyOn(fs, ...)` for file I/O |
+| `github-tools.test.ts` | `github-tools.ts` | Tool logic + idempotency | Mock Octokit factory object |
+| `model.test.ts` | `model.ts` | Provider routing | `vi.mock()` for LLM constructors |
+| `config.test.ts` | `config.ts` | Validation + exit behavior | `vi.spyOn(fs, ...)` + `vi.spyOn(process, 'exit')` |
+
+### Mock strategies explained
+
+**1. Mock Octokit factory (github-tools.test.ts)**
+
+The tool functions accept an Octokit instance as a parameter (dependency injection). Instead of mocking the `octokit` module, we create a plain object with the same shape:
+
+```typescript
+function createMockOctokit() {
+  return {
+    rest: {
+      issues: { listComments: vi.fn(), createComment: vi.fn(), ... },
+      git: { getRef: vi.fn(), createRef: vi.fn(), ... },
+      pulls: { list: vi.fn(), create: vi.fn() },
+    },
+  } as any;
+}
+```
+
+Why this works: the tool functions only use `octokit.rest.X.Y()`. They don't check `instanceof Octokit` or access any other properties. Dependency injection makes this mock trivial.
+
+This is the cleanest mock pattern in the test suite because the production code was already designed for it -- the shared Octokit client pattern from Entry 5 means tools accept their dependencies as parameters.
+
+**2. `vi.mock()` for module replacement (model.test.ts)**
+
+The model module imports `ChatAnthropic` and `ChatOpenAI` at the top level. We can't inject these as parameters (they're used inside a function). Instead, we replace the entire module:
+
+```typescript
+vi.mock('@langchain/anthropic', () => ({
+  ChatAnthropic: vi.fn().mockImplementation((opts) => ({ _type: 'anthropic', ...opts })),
+}));
+```
+
+This intercepts the import so `createModel()` gets our mock constructor instead of the real one. We can then assert which constructor was called and with what arguments.
+
+**3. `vi.spyOn` for partial mocking (core.test.ts, config.test.ts)**
+
+For `fs.existsSync` and `fs.readFileSync`, we don't want to replace the entire `fs` module. We spy on specific methods:
+
+```typescript
+vi.spyOn(fs, 'existsSync').mockReturnValue(true);
+vi.spyOn(fs, 'readFileSync').mockReturnValue(JSON.stringify(config));
+```
+
+This leaves the rest of `fs` untouched while controlling the specific functions the code under test calls.
+
+**4. `process.exit` interception (config.test.ts)**
+
+`config.ts` calls `process.exit(1)` on validation failures. In a test, this would kill the test runner. The fix:
+
+```typescript
+vi.spyOn(process, 'exit').mockImplementation(() => {
+  throw new Error('process.exit called');
+});
+```
+
+This converts `process.exit` into a thrown error, which `expect(() => ...).toThrow()` can catch. The test verifies that validation failures trigger exit AND that the correct error message was logged.
+
+### What the tests cover
+
+**core.test.ts (25 tests):**
+- `getMaxIssues`: valid numbers, zero, negative, string, null, undefined
+- `buildUserMessage`: limit inclusion, first-run vs polling, previous issues, workflow instructions
+- `buildAnalyzeMessage`: issue number inclusion, file path, workflow instructions
+- `extractProcessedIssues`: tool calls, JSON content, merging, deduplication, empty messages
+- `loadPollState`: file missing (returns null), file exists (returns parsed JSON)
+- `savePollState`: writes JSON to file
+
+**github-tools.test.ts (12 tests):**
+- Comment idempotency: skip when marker exists, post when no marker, post when empty
+- Branch idempotency: skip when branch exists, create on 404, re-throw non-404
+- PR idempotency: skip when open PR exists, create when none, verify `owner:head` format
+- Fetch issues: formatted output, `since` parameter passthrough, error string on failure
+- Read file: base64 decoding, 500-line truncation, directory error
+
+**model.test.ts (8 tests):**
+- Provider routing: anthropic, openai, openai-compatible, ollama
+- Default model fallbacks
+- Error cases: missing baseUrl for openai-compatible, unknown provider
+
+**config.test.ts (7 tests):**
+- Valid config returns successfully
+- Missing file triggers exit
+- Missing owner/token triggers exit
+- Missing API key triggers exit for cloud providers
+- Missing API key is OK for ollama and openai-compatible
+
+### What the tests do NOT cover
+
+Intentionally excluded:
+- **`agent.ts`** -- this is a thin wiring function that creates an agent with tools. Testing it would require mocking the entire `deepagents` library, which adds complexity without testing meaningful logic.
+- **`cli.ts`** -- CLI argument parsing could be tested, but the value is low. The parser is 20 lines of straightforward `if/else` logic. The interesting behavior (calling `runPollCycle`) requires the agent, which we don't want to invoke in tests.
+- **Integration tests** -- no tests make real GitHub API calls. This is deliberate: unit tests run fast and offline. Integration testing would require a test repo and real credentials, which is a Phase 7 (deployment) concern.
+
+### What the Critic should check
+
+1. **Are the Octokit mock shapes complete enough?** If a tool function accesses a property not in the mock, the test will throw `Cannot read property of undefined` -- which is actually a good thing (it catches unexpected API usage).
+2. **Does the `process.exit` mock leak?** The spy is set up in `beforeEach` and restored in `afterEach`. If a test throws before `afterEach` runs, subsequent tests might see the mocked `process.exit`. Vitest's `afterEach` should still run on test failure, but this is worth verifying.
+3. **Are the `vi.mock()` calls at the top level?** Vitest (like Jest) hoists `vi.mock()` calls to the top of the file. If they're inside a `describe` block, the behavior might differ. The current placement (top of file, before imports) is correct.
+
+### Connection to next work
+
+With tests in place, the Critic can review Phase 3 (Task #15). The test suite also serves as documentation -- each test file shows exactly what each module's contract is. Future phases can add tests alongside new features, following the patterns established here.
+
+---
+
+## Entry 17: Critic's Phase 3 Review -- CLI Architecture, Test Quality, and What Is Left Untested
+
+**Date:** 2026-02-08
+**Author:** Critic Agent
+**Reviews:** Entries 15-16 (Builder Phase 3 implementations: CLI wrapper #24, test infrastructure #23)
+**Files reviewed:** `src/cli.ts`, `src/core.ts`, `src/index.ts`, `vitest.config.ts`, all 4 test files, `package.json`, `CHANGELOG.md`
+
+### Purpose of this entry
+
+Phase 3 is about developer experience: the ability to test, debug, and operate the bot from the command line. This review evaluates whether the CLI properly separates concerns, whether the 52 tests cover meaningful behavior, and whether the mock strategies are realistic enough to catch real bugs.
+
+---
+
+### Guiding principles check
+
+| Principle | Verdict | Notes |
+|---|---|---|
+| 1. Learning first | Pass | Entry 15 explains Extract-Wrap pattern clearly. Entry 16's mock strategy comparison (factory vs. vi.mock vs. vi.spyOn) is excellent teaching material. |
+| 2. Incremental | Pass | Two patch bumps (v0.2.5, v0.2.6). `index.ts` preserved for backwards compatibility. |
+| 3. Simple file structure | Pass | Two new source files (`cli.ts`, `core.ts`), four test files in `tests/`. No over-organization. |
+| 4. CLI as the wrapper | **Strong pass** | This is the principle's defining moment. Every feature now has a CLI subcommand. Same core code for cron and CLI. |
+| 5. Humans decide | Pass | No new write actions. CLI adds read-only (`status`) and controlled (`--dry-run`) operations. |
+| 6. GitHub as the event bus | N/A | No GitHub interaction changes. |
+
+---
+
+### The core.ts extraction: well done
+
+The separation of concerns between `cli.ts`, `core.ts`, and `index.ts` is clean:
+
+- **`core.ts`** -- all logic: state management, message building, agent orchestration. Every function is exported and independently callable. No console output formatting beyond progress messages.
+- **`cli.ts`** -- all interface: argument parsing, input validation, command dispatch. No business logic.
+- **`index.ts`** -- thin backwards-compatible wrapper. 20 lines, delegates entirely to `core.ts`.
+
+**Why this matters:** Before the extraction, testing `buildUserMessage()` required running the entire entry point with a real agent. Now it is a pure function that takes three arguments and returns a string. The extraction enabled Phase 3's test infrastructure.
+
+**One observation:** `core.ts` still contains console.log calls (`runPollCycle` lines 116-121, 128-131, etc.). These are progress messages, not interface concerns, so they belong here. But if testing ever needs to verify output, these will need to be captured or injected. For now, this is fine.
+
+---
+
+### Finding 1: `cli.ts` bin field points to TypeScript source, not compiled JS
+
+**File:** `package.json:6-8` -- `"bin": { "deepagents": "./src/cli.ts" }`
+
+**What happens:** The `bin` field points to `./src/cli.ts`, a TypeScript file. When a user runs `npx deepagents poll`, Node.js attempts to execute the `.ts` file directly. This works if `tsx` is available, but will fail with a syntax error if the user only has standard Node.js.
+
+**Why this happens:** The project uses `tsx` as a dev dependency for running TypeScript directly. During development, `npm run cli` works because it uses `tsx`. But `npx deepagents` invokes the file directly with `node`, which does not understand TypeScript.
+
+**The fix options:**
+1. **Add a build step** that compiles `cli.ts` to `dist/cli.js` and point `bin` there. This is the production approach but adds complexity.
+2. **Add a shell wrapper** that invokes `tsx src/cli.ts`. This is hacky but works for a learning project.
+3. **Document that `npm run cli` is the supported interface.** The `bin` field is forward-looking for when a build step exists.
+
+**For a learning project:** Option 3 is fine. But the README and CHANGELOG mention `npx deepagents` usage, which would fail. Either fix the bin field or update the docs to use `npm run cli`.
+
+**Impact:** Medium -- documented feature does not work as advertised.
+**Effort:** Small -- either fix bin or update docs.
+
+---
+
+### Finding 2: `--dry-run` does not skip write operations -- it only skips poll state saves
+
+**File:** `src/core.ts:118-119,164-172`
+
+**What happens:** The `--dry-run` flag controls only whether `savePollState()` is called. The agent still runs and executes all tools: it posts comments, creates branches, and opens PRs.
+
+**What the CLI help says:** `"--dry-run   Run without saving poll state (no write operations skipped)"` -- the parenthetical is honest about the limitation, but the flag name `--dry-run` implies no side effects.
+
+**What Entry 15 says:** "Dry run mode (Entry 14): Fits naturally as a CLI flag." But Entry 14's finding refers to ROADMAP Issue #7 (dry run mode), which is defined as "Runs the full pipeline but skips write operations." The current implementation only skips poll state writes, not GitHub write operations.
+
+**The learning moment:** There are two levels of "dry run":
+1. **Orchestration dry run** (implemented): skip saving poll state. The agent still writes to GitHub.
+2. **Full dry run** (ROADMAP #7): wrap tools so write operations return mock results. The agent runs the full pipeline but nothing is written to GitHub.
+
+The current implementation is level 1. Level 2 is ROADMAP Issue #7, which is still open (one of the three remaining Phase 2 issues). The naming is misleading because users expect `--dry-run` to mean "no side effects."
+
+**Concrete improvement:** Rename the flag to `--no-save` or add a clear warning at startup:
+
+```
+DRY RUN: Poll state will NOT be saved.
+NOTE: GitHub operations (comments, branches, PRs) WILL still execute.
+For a full dry run without GitHub writes, use --dry-run (coming in Issue #7).
+```
+
+**Impact:** High -- users will misunderstand what `--dry-run` does and accidentally post real comments/branches/PRs.
+**Effort:** Trivial -- rename flag or add warning message.
+
+---
+
+### Finding 3: `process.exit(1)` in `cli.ts` continues the pattern from `config.ts`
+
+**File:** `src/cli.ts:58,85,98,103,126`
+
+**What happens:** Five `process.exit(1)` calls in the CLI for input validation errors. This is acceptable in CLI code (the entry point is the right place to exit), unlike `config.ts` (a library module, per Entry 7 Finding #4).
+
+**Why this is OK here:** CLI entry points are expected to call `process.exit`. The CLI is the outermost layer -- there is no caller to throw to. This is different from `config.ts`, which is called by both `cli.ts` and `index.ts` and should throw instead of exiting.
+
+**The issue:** `config.ts` still calls `process.exit(1)` (Entry 7 Finding #4, still open). The config test (`config.test.ts:6-8`) has to work around this by mocking `process.exit` to throw. This is a test smell that confirms the underlying design issue. If `loadConfig()` threw an error instead, the test would be simpler: `expect(() => loadConfig()).toThrow('config.json not found')`.
+
+**Impact:** Low (informational) -- the cli.ts usage is fine; the config.ts issue persists.
+
+---
+
+### Finding 4: `analyze` command does not update poll state
+
+**File:** `src/core.ts:179-200` -- `runAnalyzeSingle`
+
+**What happens:** When you run `deepagents analyze --issue 42`, the agent processes issue #42 (comment, branch, PR), but the issue number is not added to `lastPollIssueNumbers`. The next `deepagents poll` run will re-process issue #42.
+
+**Is this correct?** It depends on user intent:
+- If the user ran `analyze` for debugging, they probably do not want it to affect poll state.
+- If the user ran `analyze` to process a specific issue ahead of schedule, they probably do want it to be tracked.
+
+**The current behavior is reasonable** for a learning project -- `analyze` is a focused debugging tool, and keeping it separate from poll state avoids side effects. But it should be documented: "Note: `analyze` does not update poll state. The issue may be re-processed on the next `poll` run."
+
+**Impact:** Low -- correct by design but should be documented.
+**Effort:** Trivial -- one line in CLI help or README.
+
+---
+
+### Test quality assessment
+
+The 52 tests across 4 files break down as:
+
+| File | Tests | What they test | Quality |
+|---|---|---|---|
+| `core.test.ts` | 25 | Pure functions, state I/O | **Strong** -- tests edge cases (zero, negative, null, undefined), deduplication, merge behavior |
+| `github-tools.test.ts` | 12 | Idempotency, API interaction | **Strong** -- tests happy path, skip path, and error propagation. Verifies marker prepend, `owner:head` format, `draft: true`. |
+| `model.test.ts` | 8 | Provider routing | **Good** -- covers all 4 providers plus error cases. Default model fallback tested. |
+| `config.test.ts` | 7 | Validation + exit behavior | **Good** -- covers all validation branches. Local provider API key exemption tested. |
+
+**Are these meaningful tests or boilerplate?** These are meaningful tests. Specific observations:
+
+1. **`getMaxIssues` tests (8 tests)** -- This function had zero validation in Entry 14 (my Finding #7). Now it has 8 tests covering every edge case. The tests drove the implementation: `typeof raw === 'number' && raw > 0` is exactly what the tests verify. This is test-driven validation.
+
+2. **Idempotency tests (7 tests)** -- Each idempotency pattern (marker, 404, list-filter) has both a "skip" test and a "proceed" test. The branch test also verifies that non-404 errors are re-thrown (not silently swallowed). This catches the exact bug Entry 13 warned about.
+
+3. **`extractProcessedIssues` tests (7 tests)** -- Tests the fragile regex extraction from Entry 7 Finding #11. Covers both extraction paths (tool_calls and content regex), deduplication, and empty inputs. Does NOT test the false-positive case (PR numbers being matched), which Entry 7 flagged. This is an honest gap.
+
+4. **`process.exit` interception (config.test.ts:6-8)** -- Clever pattern: mock `process.exit` to throw, then use `expect().toThrow()` to catch it. This simultaneously tests that exit was called and prevents the test runner from dying.
+
+---
+
+### Finding 5: Octokit mocks do not simulate error response shapes
+
+**File:** `tests/github-tools.test.ts:122,139`
+
+**What happens:** The branch 404 test rejects with `{ status: 404 }`:
+
+```typescript
+octokit.rest.git.getRef.mockRejectedValueOnce({ status: 404 });
+```
+
+**The real Octokit error:** Octokit throws a `RequestError` object that has `status`, `message`, `response.data`, and `response.headers` properties. The mock only has `status`.
+
+**Does this matter?** Currently no -- the code only checks `(e as { status?: number }).status`. But if the code is ever refactored to access `e.message` or `e.response`, the mock would not catch the change and the test would still pass while production fails.
+
+**The learning moment:** Mocks should match the shape of the real dependency closely enough that test failures predict production failures. When the shape diverges, tests give false confidence. For this project, the current mocks are sufficient because the code's error handling is simple.
+
+**Impact:** Low -- current code only accesses `.status`.
+**Effort:** Small -- could add `message` and `response` properties to the mock for realism.
+
+---
+
+### Finding 6: No test for `list_repo_files` tool
+
+**File:** `tests/github-tools.test.ts` -- no `createListRepoFilesTool` tests
+
+**What is missing:** The test file covers `createCommentOnIssueTool`, `createBranchTool`, `createPullRequestTool`, `createGitHubIssuesTool`, and `createReadRepoFileTool`, but not `createListRepoFilesTool`. This is the tool with the most complex API chain (3 sequential calls: getRef -> getCommit -> getTree).
+
+**Why this matters:** The 3-call chain has more failure modes than any other tool: the getCommit call could fail, the tree could be truncated, the path prefix filtering could have bugs. These are exactly the cases that benefit most from testing.
+
+**What to test:**
+- Happy path: returns filtered file list
+- Truncation: `tree.truncated = true` includes warning
+- Path prefix: `"src"` is normalized to `"src/"` (the trailing slash bug from Entry 9)
+- Empty tree: returns `{ files: [], total: 0 }`
+
+**Impact:** Medium -- the most complex tool is the least tested.
+**Effort:** Small -- follows the existing mock pattern.
+
+---
+
+### Finding 7: `agent.ts` and `cli.ts` being untested -- is this a valid trade-off?
+
+Entry 16 explicitly excludes `agent.ts` and `cli.ts` from testing and explains why. Let me evaluate:
+
+**`agent.ts` (not tested):** This is a wiring function that creates an agent with tools and a system prompt. Testing it would require mocking `createDeepAgent`, which is from an external library. The function has no branching logic -- it is straight-line construction. **Verdict: valid trade-off.** The risk is a typo in the system prompt or a missing tool, both of which would be caught by a manual test run.
+
+**`cli.ts` (not tested):** The argument parser has 6 branches (4 commands + 2 error cases) and 3 flag parsers. This is simple enough to verify by reading, but complex enough that a refactor could break it silently. **Verdict: borderline.** A few tests for the `parseArgs` function would be low-effort and high-value. The function is already exported (it is a private function, but could be exported for testing). Even 3-4 tests covering basic commands and error cases would prevent regressions.
+
+**Impact:** Low for agent.ts, Medium for cli.ts.
+
+---
+
+### Finding 8: CHANGELOG duplicate v0.1.1 entry was cleaned up
+
+The team lead asked me to check this. The previous CHANGELOG had two `## v0.1.1` headers. The current file has only one (line 99). This has been fixed.
+
+---
+
+### Teaching notes accuracy check (Entries 15-16)
+
+| Claim | Accurate? | Notes |
+|---|---|---|
+| Entry 15: "Extract-Wrap pattern" | Correct term, well-explained | Split logic into shared module, wrap with thin entry points |
+| Entry 15: "No external CLI framework -- 60 lines" | Correct | `parseArgs` is 22 lines, the CLI is 69 lines total |
+| Entry 15: "bin field means npx works" | **Partially incorrect** | bin points to .ts file, which fails without tsx (Finding 1) |
+| Entry 15: "`getMaxIssues` validates with type check" | Correct | `typeof raw === 'number' && raw > 0` in core.ts:103-104 |
+| Entry 16: "ESM-native" as reason for vitest | Correct | Jest ESM support requires experimental flags and transforms |
+| Entry 16: "vi.mock() is hoisted to top of file" | Correct | Vitest hoists vi.mock calls, matching Jest behavior |
+| Entry 16: "process.exit mock converts exit to thrown error" | Correct | config.test.ts:6-8 implements this exactly |
+| Entry 16: "52 tests" | Needs verification | I count 25 + 12 + 8 + 7 = 52. Correct. |
+| Entry 16: "Dependency injection makes Octokit mock trivial" | Correct and insightful | This is the payoff of Entry 5's shared client refactor |
+
+---
+
+### Version discussion: Phase 3 and the v0.3.0 question
+
+**Current state:** v0.2.6 (Phase 1 complete + partial Phase 2 + Phase 3 complete).
+
+**The versioning plan says:** v0.3.0 = Phase 2 complete, v0.4.0 = Phase 3 complete.
+
+**The problem:** Phase 3 is done before Phase 2 is finished (3 of 7 Phase 2 issues remain: #6, #7, #11). The versioning plan assumes phases complete in order. Skipping ahead to v0.4.0 would be misleading because Phase 2 is not finished.
+
+**My recommendation:** Stay at v0.2.x until Phase 2 is complete, then bump to v0.3.0. Phase 3 features (CLI, tests) are already captured in v0.2.5 and v0.2.6. When Phase 2 finishes, bump to v0.3.0 and note in the CHANGELOG that it includes both Phase 2 and Phase 3 completions. This avoids out-of-order version semantics.
+
+---
+
+### Priority summary for improvements
+
+| Priority | Finding | Effort | What it prevents |
+|---|---|---|---|
+| **High** | #2 `--dry-run` misleading (does not skip GitHub writes) | Trivial | Users accidentally posting real comments/branches/PRs |
+| **Medium** | #1 bin field points to .ts (npx fails) | Small | Documented feature not working |
+| **Medium** | #6 No tests for `list_repo_files` | Small | Most complex tool untested |
+| **Low** | #4 `analyze` does not update poll state | Trivial (docs) | Re-processing on next poll |
+| **Low** | #5 Octokit mock error shape | Small | False test confidence |
+| **Low** | #7 `cli.ts` parseArgs untested | Small | Silent regressions on CLI changes |
+| **Info** | #3 process.exit in cli.ts | N/A | Acceptable for CLI entry points |
+| **Info** | #8 CHANGELOG duplicate cleaned | N/A | Already fixed |
+
+---
+
+### Overall assessment
+
+**What the team did well:**
+- The `core.ts` extraction is textbook separation of concerns. Every function in `core.ts` is independently testable. The Extract-Wrap pattern is explained clearly in Entry 15.
+- The test suite is genuinely useful. The `getMaxIssues` tests (8 edge cases) and idempotency tests (skip + proceed + error paths) catch real bugs. The `process.exit` interception pattern is clever and well-documented.
+- Backwards compatibility is preserved. `npm start` still works. No existing workflow is broken.
+- The CLI is pragmatic -- no unnecessary framework dependencies. Manual parsing for 4 commands and 3 flags is the right call.
+- The mock Octokit factory (`createMockOctokit`) is reusable and clean, leveraging the dependency injection pattern from Phase 0.
+- Entry 16's comparison of three mock strategies (factory, vi.mock, vi.spyOn) is excellent teaching material.
+- The CHANGELOG duplicate v0.1.1 entry was cleaned up.
+- Entry 14 Finding #7 (`maxIssuesPerRun` validation) was addressed in `getMaxIssues()`.
+
+**What needs attention:**
+- The `--dry-run` naming is the biggest issue. Users will misunderstand what it does. Either rename it or add prominent warnings.
+- The `bin` field pointing to `.ts` means `npx deepagents` does not work as documented.
+- `list_repo_files` (the most complex tool) is the only tool without tests.
+
+**The learning takeaway:** Phase 3 demonstrates that **testability is an architectural property, not a testing property.** The reason the test suite works well is not because of clever test techniques -- it is because Phase 0's shared Octokit client (dependency injection) and Phase 3's `core.ts` extraction (separation of concerns) made the code *testable by design*. The mock Octokit factory is trivial because the tools accept their dependencies as parameters. The pure function tests are trivial because `buildUserMessage()` takes arguments and returns a string, with no side effects. Writing tests is easy when the code is designed for it.
+
+### Connection to next work
+
+The remaining Phase 2 issues (#6 circuit breaker, #7 dry run, #11 action tracking) should be implemented with tests from the start, following the patterns established here. In particular:
+- Issue #7 (real dry run) will address Finding #2 by wrapping tools to skip write operations
+- Tests for #7 can use the existing mock Octokit factory to verify that mocked tools return skip results
+- Issue #6 (circuit breaker) is testable as a pure function that counts tool calls
+
+---

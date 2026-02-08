@@ -9,6 +9,33 @@
 
 ---
 
+## v0.2.6 — 2026-02-08
+
+### Added
+- **Test infrastructure** (Issue #23) — vitest setup with unit tests for all modules
+- `vitest` added as dev dependency with `vitest.config.ts`
+- `npm test` runs all tests, `npm run test:watch` for watch mode
+- 4 test files covering: `core.ts`, `github-tools.ts`, `model.ts`, `config.ts`
+- Mock patterns: Octokit mock factory, `vi.mock` for LLM constructors, `fs` spies, `process.exit` interception
+- Tests cover: idempotency logic (comment/branch/PR), config validation, provider routing, pure functions, file truncation
+
+## v0.2.5 — 2026-02-08
+
+### Added
+- **CLI wrapper** (Issue #24) — proper subcommand interface for all agent operations
+- New `src/cli.ts` entry point with subcommands: `poll`, `analyze`, `status`, `help`
+- New `src/core.ts` extracts reusable functions from `index.ts` (shared by both entry points)
+- `--dry-run` flag for poll command (no poll state written)
+- `--max-issues N` flag to override config at runtime
+- `--issue N` flag for single-issue analysis (`deepagents analyze --issue 42`)
+- `dry-run` shorthand command (equivalent to `poll --dry-run`)
+- `bin` field in package.json for `npx deepagents` usage
+- `npm run cli` script for development
+
+### Changed
+- `src/index.ts` is now a thin backwards-compatible wrapper that delegates to `core.ts`
+- `maxIssuesPerRun` validated with type check and positivity guard (addresses Critic Finding #7)
+
 ## v0.2.4 — 2026-02-08
 
 ### Changed
@@ -68,18 +95,6 @@
 ### Changed
 - System prompt updated to guide the agent to list and read relevant source files during analysis
 - Agent now has 6 custom GitHub tools (was 4)
-
-## v0.1.1 — 2026-02-08
-
-### Added
-- **`list_repo_files` tool** (Issue #1) — lists all files in the repository with path and size info
-- Path prefix filtering (e.g., `"src/"` to list only source files)
-- Branch parameter for listing files on non-default branches
-- Truncation warning when GitHub API truncates large repos
-
-### Changed
-- System prompt updated to guide the agent to use `list_repo_files` during analysis
-- Agent now has 5 custom GitHub tools (was 4)
 
 ## v0.1.1 — 2026-02-08
 
