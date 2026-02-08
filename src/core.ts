@@ -6,6 +6,29 @@ import { CircuitBreakerError, createGitHubClient } from './github-tools.js';
 import { runTriage } from './triage-agent.js';
 import type { TriageOutput } from './triage-agent.js';
 
+// ── Graceful shutdown ────────────────────────────────────────────────────────
+
+/**
+ * When true, the poll cycle will finish its current issue and exit cleanly
+ * instead of picking up the next issue. Set by SIGTERM/SIGINT handlers.
+ */
+let shuttingDown = false;
+
+export function requestShutdown(): void {
+  shuttingDown = true;
+}
+
+export function isShuttingDown(): boolean {
+  return shuttingDown;
+}
+
+/**
+ * Reset shutdown flag. Used in tests to restore clean state.
+ */
+export function resetShutdown(): void {
+  shuttingDown = false;
+}
+
 /**
  * Per-issue action tracking. Records which workflow steps have been
  * completed so the agent can resume partially-processed issues.
@@ -354,9 +377,14 @@ export async function runPollCycle(config: Config, options: { noSave?: boolean; 
 
     console.log(`\u{1F4CB} Found ${newIssues.length} new issue(s) to triage.\n`);
 
-    // Run triage on each new issue
+    // Run triage on each new issue (check shutdown flag between issues)
     const triageResults: Array<{ issue: typeof newIssues[0]; triage: TriageOutput }> = [];
     for (const issue of newIssues) {
+      if (isShuttingDown()) {
+        console.log('\n\u{1F6D1} Shutdown requested -- stopping triage early, saving state...');
+        break;
+      }
+
       console.log(`\u{1F50E} Triaging issue #${issue.number}: ${issue.title}`);
       try {
         const triageResult = await runTriage(config, issue);
@@ -402,9 +430,40 @@ export async function runPollCycle(config: Config, options: { noSave?: boolean; 
       }
       return;
     }
+
+    // If shutdown was requested during triage, save progress and exit
+    if (isShuttingDown()) {
+      const triaged = triageResults.map((r) => r.issue.number);
+      const allProcessed = [...previousIssueNumbers, ...triaged];
+
+      if (!skipSave) {
+        savePollState({
+          lastPollTimestamp: new Date().toISOString(),
+          lastPollIssueNumbers: allProcessed,
+          issues: pollState?.issues ?? {},
+        });
+        console.log(`\u{1F4BE} Poll state saved before shutdown to ${POLL_STATE_FILE}`);
+      }
+      console.log('\u{1F6D1} Graceful shutdown complete (after triage phase).');
+      return;
+    }
   }
 
   // ── Analysis phase ──────────────────────────────────────────────────────
+
+  // Check shutdown before starting the expensive analysis phase
+  if (isShuttingDown()) {
+    if (!skipSave) {
+      savePollState({
+        lastPollTimestamp: new Date().toISOString(),
+        lastPollIssueNumbers: previousIssueNumbers,
+        issues: pollState?.issues ?? {},
+      });
+      console.log(`\u{1F4BE} Poll state saved before shutdown to ${POLL_STATE_FILE}`);
+    }
+    console.log('\u{1F6D1} Graceful shutdown complete (before analysis phase).');
+    return;
+  }
 
   // Create agent
   console.log('\u{2699}\uFE0F  Creating Deep Agent...');
@@ -474,9 +533,11 @@ export async function runPollCycle(config: Config, options: { noSave?: boolean; 
   }
   console.log(`   Processed issues: ${processedNumbers.join(', ')}`);
 
-  // Exit with error code if circuit breaker tripped (useful for cron monitoring)
+  // Set exit code if circuit breaker tripped (useful for cron monitoring).
+  // Use process.exitCode instead of process.exit() so pending I/O (like
+  // poll state writes) can flush before the process terminates.
   if (circuitBroken) {
-    process.exit(2);
+    process.exitCode = 2;
   }
 }
 

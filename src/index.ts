@@ -1,5 +1,17 @@
 import { loadConfig } from './config.js';
-import { runPollCycle } from './core.js';
+import { runPollCycle, requestShutdown } from './core.js';
+
+// ── Signal handlers for graceful shutdown ────────────────────────────────────
+
+process.on('SIGTERM', () => {
+  console.log('\nReceived SIGTERM, finishing current work...');
+  requestShutdown();
+});
+
+process.on('SIGINT', () => {
+  console.log('\nReceived SIGINT, finishing current work...');
+  requestShutdown();
+});
 
 /**
  * Original entry point -- preserved for backwards compatibility.
@@ -15,5 +27,5 @@ async function main() {
 
 main().catch((error) => {
   console.error('\u{274C} Error:', error);
-  process.exit(1);
+  process.exitCode = 1;
 });

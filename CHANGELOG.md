@@ -9,6 +9,38 @@
 
 ---
 
+## v0.3.3 — 2026-02-08
+
+### Added
+- **Retry with exponential backoff** (Issue #17) -- transient GitHub API failures are retried automatically
+- New `src/utils.ts` with `withRetry()` utility function and `isRetryableError()` classifier
+- Retries on: HTTP 5xx, 429 (rate limit with Retry-After support), network errors (ECONNRESET, ETIMEDOUT, etc.)
+- Does NOT retry on 4xx client errors (except 429) -- those indicate real problems
+- Default: 3 retries with exponential backoff (1s, 2s, 4s)
+- All Octokit API calls in tool functions wrapped with `withRetry()`
+- 18 new unit tests in `tests/utils.test.ts` covering retry logic, backoff timing, error classification
+
+### Changed
+- `github-tools.ts` imports and uses `withRetry()` around every `octokit.rest.*` call
+- Existing test for non-404 branch error updated to use non-retryable status (403 instead of 500)
+
+---
+
+## v0.3.5 — 2026-02-08
+
+### Added
+- **Graceful shutdown** (Issue #22) -- SIGTERM/SIGINT handlers save poll state before exiting
+- `requestShutdown()`, `isShuttingDown()`, `resetShutdown()` exported from `src/core.ts`
+- Signal handlers registered in both `src/index.ts` and `src/cli.ts`
+- Shutdown checks at three points in `runPollCycle()`: between triage iterations, after triage phase, before analysis phase
+- 4 new unit tests in `tests/core.test.ts` (`describe('graceful shutdown', ...)`)
+
+### Changed
+- `process.exit(1)` replaced with `process.exitCode = 1` in entry point error handlers (allows pending I/O to flush)
+- `process.exit(2)` replaced with `process.exitCode = 2` for circuit breaker exit (same rationale)
+
+---
+
 ## v0.3.2 — 2026-02-08
 
 ### Added

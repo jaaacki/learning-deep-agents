@@ -1,7 +1,19 @@
 #!/usr/bin/env node
 
 import { loadConfig } from './config.js';
-import { runPollCycle, runAnalyzeSingle, runTriageSingle, showStatus } from './core.js';
+import { runPollCycle, runAnalyzeSingle, runTriageSingle, showStatus, requestShutdown } from './core.js';
+
+// ── Signal handlers for graceful shutdown ────────────────────────────────────
+
+process.on('SIGTERM', () => {
+  console.log('\nReceived SIGTERM, finishing current work...');
+  requestShutdown();
+});
+
+process.on('SIGINT', () => {
+  console.log('\nReceived SIGINT, finishing current work...');
+  requestShutdown();
+});
 
 /**
  * CLI entry point for the Deep Agents GitHub Issue Poller.
@@ -168,5 +180,5 @@ async function main() {
 
 main().catch((error) => {
   console.error('\u{274C} Error:', error);
-  process.exit(1);
+  process.exitCode = 1;
 });

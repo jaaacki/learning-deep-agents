@@ -4272,3 +4272,102 @@ This does not block the merge because the triage agent itself works correctly in
 **Recommendation to team lead:** Merge is safe -- the triage agent is a standalone component that works correctly. The handoff gap should be tracked as a known limitation and addressed in Issue #4. A `// TODO(Issue #4)` comment in `core.ts` at the analysis phase boundary would make this explicit.
 
 ---
+
+## Entry 27: Retry with Exponential Backoff -- Making API Calls Resilient (Issue #17)
+
+**Date:** 2026-02-08
+**Author:** Builder Agent
+**Builds on:** Entry 6 (GitHub API tools), Entry 20 (Circuit Breaker)
+
+### What just happened?
+
+We added a `withRetry()` utility in `src/utils.ts` and wrapped every Octokit API call in `github-tools.ts` with it. The bot now retries transient failures (5xx, 429, network errors) with exponential backoff instead of crashing.
+
+### Why retry matters for unattended bots
+
+Without retry logic, a single transient GitHub 503 kills an entire poll cycle. The bot runs on cron without human supervision -- it needs to handle the kinds of failures that resolve themselves in seconds:
+
+- **5xx server errors** -- GitHub's infrastructure occasionally returns 500/502/503 during maintenance or load spikes
+- **429 rate limits** -- GitHub's REST API allows 5000 requests/hour for authenticated users; burst activity can hit the limit
+- **Network errors** -- DNS resolution failures, connection resets, timeouts are normal on the internet
+
+These are all **transient**: wait a few seconds and retry, and they usually succeed.
+
+### What NOT to retry: 4xx client errors
+
+A 404 means the resource does not exist. A 401 means the token is invalid. A 422 means the request body is malformed. Retrying these is pointless -- they will fail the same way every time. The `isRetryableError()` classifier explicitly rejects all 4xx errors except 429.
+
+This distinction is critical: the branch existence check uses a 404 to detect "branch does not exist." If we retried 404s, the idempotency pattern would break -- the retry loop would keep trying and eventually time out instead of proceeding to create the branch.
+
+### The exponential backoff pattern
+
+```
+Attempt 0: immediate
+Attempt 1: wait 1s   (1000 * 2^0)
+Attempt 2: wait 2s   (1000 * 2^1)
+Attempt 3: wait 4s   (1000 * 2^2)
+```
+
+**Why exponential, not constant?** If the server is overloaded, hammering it every second makes things worse. Exponential backoff gives the server progressively more breathing room.
+
+### Retry-After header: let the server tell you when
+
+GitHub sends a `Retry-After` header with 429 responses. Our implementation checks for this header and uses it instead of the calculated backoff delay when present. This matters because GitHub knows how long the rate limit window lasts better than our formula does.
+
+### Where retry wrapping lives in the architecture
+
+Retry is the **innermost** wrapper, applied directly around individual Octokit API calls inside each tool function body. This is different from the circuit breaker and logging wrappers, which operate at the tool invoke layer:
+
+- Circuit breaker counts *tool invocations* (one per LLM decision)
+- Retry happens *within* a single tool invocation (transparent to the LLM)
+- A single tool call that retries 3 times counts as 1 circuit breaker increment
+
+### Testing with fake timers
+
+The retry tests use `vi.useFakeTimers()` to avoid real 1-7 second waits. Two pitfalls discovered:
+
+1. **Unhandled rejections** -- `mockRejectedValue` (persistent) combined with fake timers can cause the final rejection to escape as unhandled. Fix: chain `.catch(e => e)` to convert rejection to resolution.
+2. **Existing tests affected** -- the branch existence check test originally used `mockRejectedValueOnce({ status: 500 })`. With retry enabled, the single rejection gets retried and the mock returns `undefined` on subsequent calls. Fix: use a non-retryable error code (403) since the test verifies the re-throw path, not the specific error type.
+
+---
+
+## Entry 29: Graceful Shutdown -- Signal Handling in Node.js and Docker (Issue #22)
+
+**Date:** 2026-02-08
+**Author:** Builder Agent
+
+### Why this matters
+
+When Docker sends `docker stop`, it sends SIGTERM to the container's PID 1. If the process uses `process.exit()` in error handlers or ignores SIGTERM entirely, the running work is killed mid-flight. For this bot, that means `last_poll.json` might not get saved, causing duplicate processing on the next run.
+
+### The pattern: cooperative cancellation
+
+Instead of killing the process immediately, we set a boolean flag (`shuttingDown`) and check it at natural "seam points" in the poll cycle:
+
+1. **Between triage iterations** -- before picking up the next issue to triage
+2. **After triage, before analysis** -- the most expensive phase hasn't started yet
+3. **Before agent invocation** -- if triage was skipped via `--skip-triage`
+
+At each checkpoint, if the flag is set, we save poll state with whatever progress we've made and return cleanly. The process then exits naturally as the event loop drains.
+
+### Why `process.exitCode` instead of `process.exit()`
+
+`process.exit(N)` terminates the process immediately, which can:
+- Interrupt pending file writes (like saving `last_poll.json`)
+- Skip `finally` blocks and cleanup handlers
+- Lose buffered stdout/stderr output
+
+`process.exitCode = N` sets the exit code but lets the process finish naturally. The event loop drains, all pending I/O completes, and *then* the process exits with the specified code. This is the Node.js-recommended approach for non-emergency exits.
+
+### Why we don't forcefully kill during `agent.invoke()`
+
+Once the LLM agent is running (`agent.invoke()`), we can't easily interrupt it mid-call -- LangChain's invoke is a single async operation. The shutdown flag is checked *before* starting the agent, not during. If a signal arrives during agent execution, the agent finishes its current run, then the normal post-agent code saves poll state and the process exits. This is acceptable because:
+- Agent runs are bounded by the circuit breaker (max tool calls)
+- A single analysis pass is minutes, not hours
+- Docker's default SIGTERM timeout is 10 seconds before SIGKILL, but `docker stop -t 120` can extend this
+
+### Teaching note: signal safety in Node.js
+
+Signal handlers in Node.js run in the main thread's event loop, so they're safe to use with `console.log()` and simple variable assignment. Unlike C where signal handlers have severe restrictions (only async-signal-safe functions), Node.js handlers are regular JavaScript callbacks scheduled by libuv. The key constraint is: don't do heavy async work in the handler itself -- just set a flag and let the main code path check it.
+
+---
