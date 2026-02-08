@@ -4425,3 +4425,44 @@ The listener is a standalone long-running process, not integrated into the poll 
 Future work (#13/#14) will wire webhook events to the same `runAnalyzeSingle()` and triage functions, creating a shared code path between both triggers.
 
 ---
+
+## Entry 32: Graceful Shutdown -- Signal Handling in Node.js and Docker (Issue #22)
+
+**Date:** 2026-02-08
+**Author:** Builder Agent
+
+### Why this matters
+
+When Docker sends `docker stop`, it sends SIGTERM to the container's PID 1. If the process uses `process.exit()` in error handlers or ignores SIGTERM entirely, the running work is killed mid-flight. For this bot, that means `last_poll.json` might not get saved, causing duplicate processing on the next run.
+
+### The pattern: cooperative cancellation
+
+Instead of killing the process immediately, we set a boolean flag (`shuttingDown`) and check it at natural "seam points" in the poll cycle:
+
+1. **Between triage iterations** -- before picking up the next issue to triage
+2. **After triage, before analysis** -- the most expensive phase hasn't started yet
+3. **Before agent invocation** -- if triage was skipped via `--skip-triage`
+
+At each checkpoint, if the flag is set, we save poll state with whatever progress we've made and return cleanly. The process then exits naturally as the event loop drains.
+
+### Why `process.exitCode` instead of `process.exit()`
+
+`process.exit(N)` terminates the process immediately, which can:
+- Interrupt pending file writes (like saving `last_poll.json`)
+- Skip `finally` blocks and cleanup handlers
+- Lose buffered stdout/stderr output
+
+`process.exitCode = N` sets the exit code but lets the process finish naturally. The event loop drains, all pending I/O completes, and *then* the process exits with the specified code. This is the Node.js-recommended approach for non-emergency exits.
+
+### Why we don't forcefully kill during `agent.invoke()`
+
+Once the LLM agent is running (`agent.invoke()`), we can't easily interrupt it mid-call -- LangChain's invoke is a single async operation. The shutdown flag is checked *before* starting the agent, not during. If a signal arrives during agent execution, the agent finishes its current run, then the normal post-agent code saves poll state and the process exits. This is acceptable because:
+- Agent runs are bounded by the circuit breaker (max tool calls)
+- A single analysis pass is minutes, not hours
+- Docker's default SIGTERM timeout is 10 seconds before SIGKILL, but `docker stop -t 120` can extend this
+
+### Teaching note: signal safety in Node.js
+
+Signal handlers in Node.js run in the main thread's event loop, so they're safe to use with `console.log()` and simple variable assignment. Unlike C where signal handlers have severe restrictions (only async-signal-safe functions), Node.js handlers are regular JavaScript callbacks scheduled by libuv. The key constraint is: don't do heavy async work in the handler itself -- just set a flag and let the main code path check it.
+
+---

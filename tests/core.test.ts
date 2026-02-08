@@ -10,6 +10,9 @@ import {
   getMaxIssues,
   getMaxToolCalls,
   migratePollState,
+  requestShutdown,
+  isShuttingDown,
+  resetShutdown,
 } from '../src/core.js';
 import type { IssueActions } from '../src/core.js';
 
@@ -360,5 +363,38 @@ describe('buildUserMessage with issueActions', () => {
     const msg = buildUserMessage(5, null, []);
     expect(msg).toContain('first poll run');
     expect(msg).not.toContain('Partially-processed');
+  });
+});
+
+// ── Graceful shutdown ─────────────────────────────────────────────────────────
+
+describe('graceful shutdown', () => {
+  afterEach(() => {
+    resetShutdown();
+  });
+
+  it('isShuttingDown returns false by default', () => {
+    expect(isShuttingDown()).toBe(false);
+  });
+
+  it('requestShutdown sets the flag to true', () => {
+    requestShutdown();
+    expect(isShuttingDown()).toBe(true);
+  });
+
+  it('resetShutdown clears the flag', () => {
+    requestShutdown();
+    expect(isShuttingDown()).toBe(true);
+    resetShutdown();
+    expect(isShuttingDown()).toBe(false);
+  });
+
+  it('multiple requestShutdown calls are idempotent', () => {
+    requestShutdown();
+    requestShutdown();
+    requestShutdown();
+    expect(isShuttingDown()).toBe(true);
+    resetShutdown();
+    expect(isShuttingDown()).toBe(false);
   });
 });
