@@ -1,6 +1,6 @@
 import { createHmac, timingSafeEqual } from 'crypto';
 import express from 'express';
-import type { Request, Response, NextFunction } from 'express';
+import type { Request, Response } from 'express';
 
 /**
  * Webhook listener configuration.
@@ -20,6 +20,121 @@ export interface WebhookEvent {
   deliveryId: string;
   /** The parsed JSON payload */
   payload: Record<string, unknown>;
+}
+
+/** Marker that identifies PRs created by this bot. */
+export const BOT_PR_MARKER = '<!-- deep-agent-pr -->';
+
+/** Branch naming pattern used by the bot: issue-N-description */
+const BOT_BRANCH_RE = /^issue-\d+-/;
+
+/**
+ * Extracted metadata from a pull_request.opened payload.
+ */
+export interface PrOpenedData {
+  number: number;
+  title: string;
+  body: string;
+  headRef: string;
+  baseRef: string;
+  draft: boolean;
+}
+
+/**
+ * Result of handling a pull_request.opened event.
+ * The `reviewQueued` field indicates whether the PR was recognized as
+ * bot-created and queued for future review (Issue #15).
+ */
+export interface PrHandlerResult {
+  handled: boolean;
+  reviewQueued: boolean;
+  reason: string;
+  pr?: PrOpenedData;
+}
+
+/**
+ * Stub interface for the future PR reviewer (Issue #15).
+ * When the reviewer bot is implemented, it will satisfy this interface
+ * and be wired into handlePullRequestEvent.
+ */
+export interface PrReviewStub {
+  reviewPr(pr: PrOpenedData): Promise<void>;
+}
+
+/**
+ * Check if a PR was created by this bot.
+ * Uses two signals: the HTML marker in the PR body, or the branch naming convention.
+ */
+export function isBotPr(body: string, headRef: string): boolean {
+  return body.includes(BOT_PR_MARKER) || BOT_BRANCH_RE.test(headRef);
+}
+
+/**
+ * Handle a pull_request.opened webhook event.
+ *
+ * - If the PR was created by the bot, log it as queued for review and return.
+ *   (The actual reviewer bot will be added in Issue #15.)
+ * - If the PR was NOT created by the bot, ignore it.
+ * - Returns immediately (fire-and-forget pattern for the webhook endpoint).
+ */
+export function handlePullRequestEvent(event: WebhookEvent): PrHandlerResult {
+  const { payload } = event;
+
+  if (payload.action !== 'opened') {
+    return { handled: false, reviewQueued: false, reason: `Ignored action: ${payload.action}` };
+  }
+
+  const pr = payload.pull_request as Record<string, unknown> | undefined;
+  if (!pr || typeof pr.number !== 'number') {
+    console.error(`[webhook] pull_request.opened missing PR data (delivery: ${event.deliveryId})`);
+    return { handled: false, reviewQueued: false, reason: 'Missing PR data in payload' };
+  }
+
+  const head = pr.head as Record<string, unknown> | undefined;
+  const base = pr.base as Record<string, unknown> | undefined;
+
+  const prData: PrOpenedData = {
+    number: pr.number as number,
+    title: (pr.title as string) ?? '',
+    body: (pr.body as string) ?? '',
+    headRef: (head?.ref as string) ?? '',
+    baseRef: (base?.ref as string) ?? '',
+    draft: (pr.draft as boolean) ?? false,
+  };
+
+  if (!isBotPr(prData.body, prData.headRef)) {
+    console.log(
+      `[webhook] PR #${prData.number} not created by bot, ignoring ` +
+      `(delivery: ${event.deliveryId})`,
+    );
+    return { handled: true, reviewQueued: false, reason: 'PR not created by bot', pr: prData };
+  }
+
+  // Bot-created PR — queue for review (stub until Issue #15)
+  console.log(
+    `[webhook] PR #${prData.number} "${prData.title}" queued for review ` +
+    `(delivery: ${event.deliveryId}) [reviewer not implemented yet]`,
+  );
+
+  return {
+    handled: true,
+    reviewQueued: true,
+    reason: 'Queued for review (reviewer not implemented yet — see Issue #15)',
+    pr: prData,
+  };
+}
+
+/**
+ * Dispatch a parsed webhook event to the appropriate handler.
+ * Returns the handler result, or null if no handler matched.
+ */
+export function handleWebhookEvent(event: WebhookEvent): PrHandlerResult | null {
+  if (event.event === 'pull_request') {
+    return handlePullRequestEvent(event);
+  }
+
+  // Other event types will be added here (e.g. issues.opened from #13)
+  return null;
 }
 
 /**
@@ -112,14 +227,22 @@ export function createWebhookApp(config: WebhookConfig): express.Express {
       payload,
     };
 
-    // Log the event (actual handling deferred to #13/#14)
+    // Log the event
     const action = typeof payload.action === 'string' ? payload.action : '';
     console.log(
       `[webhook] Received: ${event}${action ? `.${action}` : ''} ` +
       `(delivery: ${webhookEvent.deliveryId})`,
     );
 
+    // Fire-and-forget: respond 200 immediately, then dispatch
     res.status(200).json({ received: true, event, deliveryId: webhookEvent.deliveryId });
+
+    // Dispatch to event handlers (async, after response is sent)
+    try {
+      handleWebhookEvent(webhookEvent);
+    } catch (err) {
+      console.error(`[webhook] Handler error for ${event}.${action}:`, err);
+    }
   });
 
   return app;

@@ -1,7 +1,17 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { createHmac } from 'crypto';
-import { createWebhookApp, verifySignature } from '../src/listener.js';
-import type { WebhookConfig } from '../src/listener.js';
+
+// vi.mock is hoisted, so we use vi.hoisted to define the mock function
+const { mockRunAnalyzeSingle } = vi.hoisted(() => ({
+  mockRunAnalyzeSingle: vi.fn().mockResolvedValue(undefined),
+}));
+
+vi.mock('../src/core.js', () => ({
+  runAnalyzeSingle: mockRunAnalyzeSingle,
+}));
+
+import { createWebhookApp, verifySignature, handleIssuesEvent, handleWebhookEvent } from '../src/listener.js';
+import type { WebhookConfig, WebhookEvent } from '../src/listener.js';
 
 // ── verifySignature ──────────────────────────────────────────────────────────
 
@@ -73,10 +83,6 @@ describe('createWebhookApp', () => {
     return `sha256=${hmac}`;
   }
 
-  /**
-   * Inject a request into the Express app and capture the response.
-   * Uses Node's built-in http module to avoid adding supertest as a dep.
-   */
   async function inject(
     app: ReturnType<typeof createWebhookApp>,
     method: string,
@@ -260,5 +266,171 @@ describe('createWebhookApp', () => {
 
     expect(res.status).toBe(400);
     expect(res.body.error).toBe('Invalid JSON payload');
+  });
+});
+
+// ── handleIssuesEvent ───────────────────────────────────────────────────────
+
+describe('handleIssuesEvent', () => {
+  const fakeConfig = {
+    github: { owner: 'test-owner', repo: 'test-repo', token: 'fake-token' },
+    llm: { provider: 'anthropic', apiKey: 'fake-key', model: 'claude-3' },
+  } as any;
+
+  beforeEach(() => {
+    vi.spyOn(console, 'log').mockImplementation(() => {});
+    vi.spyOn(console, 'error').mockImplementation(() => {});
+    mockRunAnalyzeSingle.mockReset().mockResolvedValue(undefined);
+  });
+
+  afterEach(() => {
+    vi.restoreAllMocks();
+  });
+
+  function makeIssueEvent(overrides: Partial<WebhookEvent> = {}): WebhookEvent {
+    return {
+      event: 'issues',
+      deliveryId: 'test-delivery',
+      payload: {
+        action: 'opened',
+        issue: { number: 42, title: 'Test issue' },
+      },
+      ...overrides,
+    };
+  }
+
+  it('triggers analysis for issues.opened event', async () => {
+    const result = await handleIssuesEvent(makeIssueEvent(), fakeConfig);
+
+    expect(result.handled).toBe(true);
+    expect(result.reason).toBe('Analysis triggered');
+    expect(result.issueNumber).toBe(42);
+    expect(mockRunAnalyzeSingle).toHaveBeenCalledWith(fakeConfig, 42);
+  });
+
+  it('ignores issues.edited action (only opened triggers analysis)', async () => {
+    const event = makeIssueEvent({
+      payload: { action: 'edited', issue: { number: 42 } },
+    });
+
+    const result = await handleIssuesEvent(event, fakeConfig);
+
+    expect(result.handled).toBe(false);
+    expect(result.reason).toContain('Ignored action: edited');
+    expect(mockRunAnalyzeSingle).not.toHaveBeenCalled();
+  });
+
+  it('ignores issues.closed action', async () => {
+    const event = makeIssueEvent({
+      payload: { action: 'closed', issue: { number: 42 } },
+    });
+
+    const result = await handleIssuesEvent(event, fakeConfig);
+
+    expect(result.handled).toBe(false);
+    expect(result.reason).toContain('Ignored action: closed');
+  });
+
+  it('handles missing issue.number gracefully', async () => {
+    const event = makeIssueEvent({
+      payload: { action: 'opened', issue: { title: 'No number' } },
+    });
+
+    const result = await handleIssuesEvent(event, fakeConfig);
+
+    expect(result.handled).toBe(false);
+    expect(result.reason).toBe('Missing issue.number in payload');
+    expect(console.error).toHaveBeenCalledWith(
+      expect.stringContaining('missing issue.number'),
+    );
+  });
+
+  it('handles missing issue object gracefully', async () => {
+    const event = makeIssueEvent({
+      payload: { action: 'opened' },
+    });
+
+    const result = await handleIssuesEvent(event, fakeConfig);
+
+    expect(result.handled).toBe(false);
+    expect(result.reason).toBe('Missing issue.number in payload');
+  });
+
+  it('catches analysis errors without crashing (returns 200 to GitHub)', async () => {
+    mockRunAnalyzeSingle.mockRejectedValue(new Error('LLM timeout'));
+
+    const result = await handleIssuesEvent(makeIssueEvent(), fakeConfig);
+
+    expect(result.handled).toBe(true);
+    expect(result.issueNumber).toBe(42);
+    expect(console.error).toHaveBeenCalledWith(
+      expect.stringContaining('Analysis failed for #42'),
+      expect.any(Error),
+    );
+  });
+
+  it('logs handling start and completion', async () => {
+    await handleIssuesEvent(makeIssueEvent(), fakeConfig);
+
+    expect(console.log).toHaveBeenCalledWith(
+      expect.stringContaining('Handling issues.opened for #42'),
+    );
+    expect(console.log).toHaveBeenCalledWith(
+      expect.stringContaining('Analysis complete for #42'),
+    );
+  });
+});
+
+// ── handleWebhookEvent (dispatcher) ─────────────────────────────────────────
+
+describe('handleWebhookEvent', () => {
+  const fakeConfig = {
+    github: { owner: 'test-owner', repo: 'test-repo', token: 'fake-token' },
+    llm: { provider: 'anthropic', apiKey: 'fake-key', model: 'claude-3' },
+  } as any;
+
+  beforeEach(() => {
+    vi.spyOn(console, 'log').mockImplementation(() => {});
+    vi.spyOn(console, 'error').mockImplementation(() => {});
+    mockRunAnalyzeSingle.mockReset().mockResolvedValue(undefined);
+  });
+
+  afterEach(() => {
+    vi.restoreAllMocks();
+  });
+
+  it('dispatches issues event to handleIssuesEvent when config provided', async () => {
+    const event: WebhookEvent = {
+      event: 'issues',
+      deliveryId: 'dispatch-1',
+      payload: { action: 'opened', issue: { number: 99 } },
+    };
+
+    const result = handleWebhookEvent(event, fakeConfig);
+    expect(result).toBeInstanceOf(Promise);
+
+    const resolved = await result;
+    expect(resolved!.handled).toBe(true);
+    expect(resolved!.issueNumber).toBe(99);
+  });
+
+  it('returns null for issues event without config', () => {
+    const event: WebhookEvent = {
+      event: 'issues',
+      deliveryId: 'dispatch-2',
+      payload: { action: 'opened', issue: { number: 1 } },
+    };
+
+    expect(handleWebhookEvent(event)).toBeNull();
+  });
+
+  it('returns null for unhandled event types', () => {
+    const event: WebhookEvent = {
+      event: 'push',
+      deliveryId: 'dispatch-3',
+      payload: { ref: 'refs/heads/main' },
+    };
+
+    expect(handleWebhookEvent(event, fakeConfig)).toBeNull();
   });
 });

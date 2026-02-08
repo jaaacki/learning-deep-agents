@@ -206,7 +206,7 @@ async function main() {
         process.exit(1);
       }
       console.log('\u{1F916} Deep Agents Webhook Listener\n');
-      startWebhookServer(config.webhook);
+      startWebhookServer(config.webhook, config);
       // Server runs until process is killed (SIGTERM/SIGINT)
       break;
     }
