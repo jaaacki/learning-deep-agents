@@ -12,6 +12,8 @@ import {
   createDryRunCommentTool,
   createDryRunBranchTool,
   createDryRunPullRequestTool,
+  createOrUpdateFileTool,
+  createDryRunCreateOrUpdateFileTool,
   ToolCallCounter,
   wrapWithCircuitBreaker,
 } from './github-tools.js';
@@ -36,6 +38,7 @@ export function createDeepAgentWithGitHub(config: Config, options: { maxIssues?:
   let commentTool = options.dryRun ? createDryRunCommentTool() : createCommentOnIssueTool(owner, repo, octokit);
   let branchTool = options.dryRun ? createDryRunBranchTool() : createBranchTool(owner, repo, octokit);
   let prTool = options.dryRun ? createDryRunPullRequestTool() : createPullRequestTool(owner, repo, octokit);
+  let commitFileTool = options.dryRun ? createDryRunCreateOrUpdateFileTool() : createOrUpdateFileTool(owner, repo, octokit);
 
   // Circuit breaker: wrap all tools with a shared call counter
   if (options.maxToolCalls) {
@@ -46,6 +49,7 @@ export function createDeepAgentWithGitHub(config: Config, options: { maxIssues?:
     commentTool = wrapWithCircuitBreaker(commentTool, counter);
     branchTool = wrapWithCircuitBreaker(branchTool, counter);
     prTool = wrapWithCircuitBreaker(prTool, counter);
+    commitFileTool = wrapWithCircuitBreaker(commitFileTool, counter);
   }
 
   // System prompt - full workflow instructions
@@ -75,7 +79,14 @@ When given issues to analyze, follow this workflow for EACH issue:
    - Use create_branch with name: issue-<number>-<short-description>
    - Use lowercase, hyphens for spaces, keep it short but descriptive
 
-5. OPEN a draft PR:
+5. COMMIT proposed changes to the branch:
+   - Use create_or_update_file to write your proposed fix to the feature branch
+   - Each call commits one file. Make multiple calls for multi-file changes.
+   - Write the FULL file content (not a diff) — the tool replaces the entire file
+   - Use clear commit messages like "Fix #<number>: improve README structure"
+   - You MUST commit at least one file so the PR has a real diff
+
+6. OPEN a draft PR:
    - Use create_pull_request with:
      - title: "Fix #<number>: <short description>"
      - body: Include "Closes #<number>" on its own line, plus your analysis summary
@@ -83,11 +94,11 @@ When given issues to analyze, follow this workflow for EACH issue:
    - This links the PR to the issue automatically
 
 IMPORTANT:
-- Always create the branch BEFORE the PR (the PR needs the branch to exist)
+- Always create the branch BEFORE committing files, and commit files BEFORE the PR
 - Use write_todos at the start to plan your approach for all issues
-- Process issues one at a time, completing all 5 steps before moving to the next
+- Process issues one at a time, completing all 6 steps before moving to the next
 - Never merge PRs -- always open them as drafts
-- Write tools (comment, branch, PR) are idempotent. If they return { skipped: true }, the work was already done -- move to the next step without retrying
+- Write tools (comment, branch, PR, create_or_update_file) are idempotent. If they return { skipped: true }, the work was already done -- move to the next step without retrying
 
 Available tools:
 - fetch_github_issues: Fetch issues from the repo (supports 'since' for polling)
@@ -95,6 +106,7 @@ Available tools:
 - read_repo_file: Read a single file's contents from the repo
 - comment_on_issue: Post a comment on a GitHub issue
 - create_branch: Create a new branch in the repo
+- create_or_update_file: Commit a file to a branch (creates one commit per call)
 - create_pull_request: Open a draft PR
 - write_file: Write analysis files to ./issues/
 - read_file: Read local files
@@ -104,7 +116,7 @@ Available tools:
   // Create the agent
   const agent = createDeepAgent({
     model,
-    tools: [githubIssuesTool, listFilesTool, readFileTool, commentTool, branchTool, prTool],
+    tools: [githubIssuesTool, listFilesTool, readFileTool, commentTool, branchTool, commitFileTool, prTool],
     systemPrompt,
   });
 
