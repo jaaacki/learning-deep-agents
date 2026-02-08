@@ -9,6 +9,22 @@
 
 ---
 
+## v0.3.1 — 2026-02-08
+
+### Added
+- **`create_or_update_file` tool** (Issue #25) — commits files to branches via GitHub Contents API
+- Agent can now push proposed code changes to feature branches, producing PRs with actual diffs
+- Dry-run stub for the new tool
+- Circuit breaker wraps the new tool
+- **Self-review step** (Issue #27) — agent reads back committed files and sanity-checks before opening PR
+- Agent workflow expanded from 5 to 7 steps: analyze → comment → document → branch → commit → self-review → PR
+
+### Changed
+- System prompt updated with code quality guidelines (soft, not hard constraints)
+- Agent now produces PRs with real file changes instead of empty branches
+
+---
+
 ## v0.3.0 — 2026-02-08
 
 **Milestone: Phase 2 (Safety & Idempotency) + Phase 3 (CLI & Testing) complete.**
