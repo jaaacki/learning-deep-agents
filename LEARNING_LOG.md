@@ -5122,3 +5122,115 @@ The Critic and Architect both noted that `IssueActions` must not be modified (it
 **Conservative system prompt guidance:**
 
 The prompt says "if triage context is provided" rather than assuming it always exists. This handles: (a) first run with no triage, (b) `--skip-triage` mode, (c) backward compatibility with older poll state files.
+
+---
+
+## Entry 39: Critic's Batch 2 Review -- PR #41 (Issue #4) and PR #40 (Issue #32)
+
+**Date:** 2026-02-08
+**Author:** Critic Agent
+**Reviews:** PR #41 (issue-4-analysis-agent), PR #40 (issue-32-retract-command)
+
+---
+
+### Cross-PR Contamination: CONFIRMED in PR #40
+
+**This is the most significant finding.** PR #40 (issue #32, retract command) contains the ENTIRE diff from PR #41 (issue #4, triage-to-analysis handoff). The contamination is visible in every shared file:
+
+| File | PR #41 additions | PR #40 additions | PR #40 unique to #32 |
+|------|-----------------|-----------------|---------------------|
+| `src/core.ts` | 28 lines | 130 lines | ~102 lines (retract) |
+| `src/agent.ts` | identical diff | identical diff | 0 lines |
+| `tests/core.test.ts` | 13 tests (triage) | 13 tests (triage) + 7 tests (retract) | 7 tests |
+| `CHANGELOG.md` | v0.3.8 entry | v0.3.8 + v0.3.9 entries | v0.3.9 entry |
+| `LEARNING_LOG.md` | Entry 37 | Entry 37 + Entry 38 | Entry 38 |
+
+**Root cause:** Builder-32 branched from a working tree that already had builder-4's uncommitted changes, or builder-32 started after builder-4's commit was on the branch. The builder-32 warning about "picked up uncommitted changes from builder-4" confirms this.
+
+**Impact on merge:** If we merge PR #41 first (as planned), then PR #40 will have merge conflicts in every shared file because the same lines appear in both diffs. The merge coordinator must:
+1. Merge PR #41 into main first (clean merge)
+2. Rebase PR #40 onto the updated main
+3. Resolve conflicts by keeping only the #32-specific additions (retract function, retract CLI, retract tests, Entry 38, v0.3.9 changelog)
+
+This is the exact same pattern as Batch 1's CHANGELOG/LEARNING_LOG conflicts, but worse because it extends into source code (`core.ts`, `agent.ts`) and tests (`core.test.ts`).
+
+**Recommendation:** The merge coordinator should handle this carefully. The conflicts are resolvable but require manual attention in 5+ files.
+
+---
+
+### PR #41 (Issue #4 -- Analysis Agent): APPROVE
+
+**Implementation correctness: GOOD**
+
+1. **Triage-to-analysis handoff is correctly wired.** `runPollCycle()` collects triage results during the triage phase (line 517-519 in the diff), stores them in `collectedTriageResults`, and passes them to `buildUserMessage()` as the 5th argument. This closes the HIGH-severity gap flagged in MEMORY.md.
+
+2. **`IssueActions` interface NOT modified.** Verified: the interface at lines 37-42 is byte-identical to main. Triage data is stored in a new `PollState.triageResults` field (line 52-53 in the diff). This respects the constraint from Entry 36.
+
+3. **System prompt update is conservative.** The prompt says "If TRIAGE CONTEXT is provided" with a conditional, handling the case where triage context is absent. The agent is instructed to skip `list_repo_files` when triage already identified relevant files, but "may still call it if needed." Good balance.
+
+4. **Poll state persistence includes triage results.** New triage results are merged with existing ones from previous polls (`{ ...pollState?.triageResults, ...collectedTriageResults }`). Empty results produce `undefined` (not `{}`), keeping the JSON clean.
+
+**Test quality: GOOD**
+
+- 13 new tests covering: triage context in user message (header, issue number, type, complexity, files, summary), empty/missing triage, no-files case, multiple issues, combined action+triage context, workflow instructions still present.
+- The `savePollState` and `migratePollState` tests verify the new `triageResults` field round-trips through JSON serialization.
+- All 191 tests pass (8 test files).
+
+**Minor observations (not blocking):**
+- The triage context format uses `type=bug, complexity=moderate` which is readable but not machine-parseable. For a learning project this is fine.
+- Entry 37 uses the title "Triage-to-Analysis Handoff" rather than "Analysis Agent Implementation" (the pre-assigned title from the corrected Entry 36 table). The content is more accurate than the pre-assigned title, so this is fine.
+
+**Version: v0.3.8.** This is a patch bump, not v0.4.0 (which Entry 35 planned for Phase 4 completion). The Architect's plan called for v0.4.0 when #4 merges, but the builder chose a patch bump. This is a deviation. The merge coordinator should decide: does #4 complete Phase 4 (warranting v0.4.0), or is #4 just a step toward it? Looking at the ROADMAP, Phase 4 has only two issues (#3 triage, #4 analysis), and #3 is already done. So #4 DOES complete Phase 4 and should be v0.4.0. **The merge coordinator should bump to v0.4.0 at merge time.**
+
+**VERDICT: APPROVE. Bump version to v0.4.0 at merge.**
+
+---
+
+### PR #40 (Issue #32 -- Retract Command): APPROVE WITH CONDITIONS
+
+**Implementation correctness: GOOD**
+
+1. **`retractIssue()` function is well-structured.** Order of operations is correct: close PR first (preserves branch reference), then delete branch, then delete comment. Each step is wrapped in try/catch for partial retraction. Uses `withRetry()` for transient failures.
+
+2. **Sentinel value handling is correct.** PR number 0 and comment ID 0 are skipped (these come from migrated old-format state where we know an action happened but don't have the real ID). Branch deletion still proceeds even with empty SHA, because the branch name is the meaningful identifier.
+
+3. **Poll state cleanup is correct.** After retraction, the issue is removed from both `pollState.issues` (action map) and `pollState.lastPollIssueNumbers` (processed list). This means the next poll run will re-discover the issue -- correct "undo and redo" behavior.
+
+4. **CLI subcommand is properly implemented.** `case 'retract':` follows the same pattern as `analyze` and `triage`: validates `--issue N`, calls `retractIssue()`, prints a summary. Usage text, help text, and examples are all updated.
+
+5. **No new tools in `github-tools.ts`.** The builder made a conscious decision (documented in Entry 38) to use Octokit directly rather than creating LangChain tools. This is correct -- retract is a human-invoked CLI command, not an agent-facing tool. This matches my Entry 36 note that #32 would touch `github-tools.ts`, but the builder found a simpler approach.
+
+**Test quality: GOOD**
+
+- 7 new tests covering: full retraction, no poll state, missing issue, partial (PR-only, comment-only), error recovery (PR fails but branch+comment succeed), migrated-format safety (zero IDs skipped).
+- Mock pattern uses `vi.mock('../src/github-tools.js')` at module level to intercept `createGitHubClient`. This is a new pattern in the codebase (previous tests mocked Octokit at the function parameter level). Works but has a side effect: the mock is module-scoped, meaning ALL tests in `core.test.ts` now run with the mocked `createGitHubClient`. The existing tests don't call `createGitHubClient` directly so this is harmless, but it's a latent risk for future tests.
+
+**Cross-contamination (see above):** PR #40 contains all of PR #41's changes. This is NOT a code quality issue in the retract implementation itself -- the retract code is clean and correct. It's a branching/isolation issue that the merge coordinator must handle.
+
+**Version discrepancy:** CHANGELOG says v0.3.9 but `package.json` says v0.3.8 (same as PR #41). This is because the contamination means PR #40 has PR #41's package.json bump to v0.3.8. The merge coordinator must bump `package.json` to the correct version at merge time. Per the Architect's plan, #32 completes Phase 5 and should be v0.5.0. **The merge coordinator should bump to v0.5.0 at merge.**
+
+**Questions raised by the builder (Entry 38) -- my answers:**
+
+1. **Should retraction also delete `./issues/issue_N.md`?** No, not by default. The local file is a useful historical record even after retraction. If needed, add `--delete-local` flag later.
+
+2. **Is retrying deletes safe?** Yes. Deletes are idempotent -- GitHub returns 404 for already-deleted resources, and `withRetry` only retries on 5xx/429. A 404 on delete would surface as an error in `RetractResult.errors`, which is the correct behavior.
+
+3. **Should there be a `--dry-run` flag for retract?** Worth adding later as a separate enhancement. Not blocking for this PR.
+
+**VERDICT: APPROVE WITH CONDITIONS:**
+1. Merge coordinator must resolve cross-contamination conflicts (merge #41 first, rebase #40, strip duplicate changes)
+2. Bump `package.json` version to v0.5.0 at merge
+3. The module-level `vi.mock` for `createGitHubClient` should be watched in future test additions
+
+---
+
+### Summary
+
+| PR | Issue | Verdict | Key conditions |
+|----|-------|---------|----------------|
+| #41 | #4 (analysis agent) | **APPROVE** | Bump to v0.4.0 at merge (completes Phase 4) |
+| #40 | #32 (retract command) | **APPROVE WITH CONDITIONS** | 1. Resolve cross-contamination at merge. 2. Bump to v0.5.0 (completes Phase 5). 3. Watch module-level mock. |
+
+**Merge order: PR #41 first, then rebase and merge PR #40.**
+
+**Test counts after both merge:** 198 total (191 from PR #41 + 7 new retract tests from PR #40). Both branches pass all tests independently.

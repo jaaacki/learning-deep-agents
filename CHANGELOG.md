@@ -9,7 +9,9 @@
 
 ---
 
-## v0.3.8 — 2026-02-08
+## v0.4.0 — 2026-02-08
+
+**Milestone: Phase 4 (Intelligence) complete.** Issues go through triage (cheap/fast) then deep analysis (thorough) with triage context passed through.
 
 ### Changed
 - **Triage-to-analysis handoff** (Issue #4) — triage results are now passed to the analysis agent as context

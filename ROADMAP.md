@@ -56,16 +56,16 @@ An autonomous bot that watches a GitHub repository, analyzes new issues with AI,
 
 ---
 
-## Phase 4 — Intelligence
+## Phase 4 — Intelligence ✓ (v0.4.0)
 
 > Smarter analysis with two-phase agent architecture.
 
 | # | Issue | Status |
 |---|-------|--------|
 | [#3](../../issues/3) | Triage agent (phase 1 — scope the issue) | ✓ v0.3.2 |
-| [#4](../../issues/4) | Analysis agent (phase 2 — deep code-aware analysis) | Open |
+| [#4](../../issues/4) | Analysis agent (phase 2 — deep code-aware analysis) | ✓ v0.4.0 |
 
-**Milestone:** Issues go through triage (cheap/fast) then deep analysis (thorough). Each phase can use a different model. LangGraph StateGraph pattern in use.
+**Milestone:** Issues go through triage (cheap/fast) then deep analysis (thorough). Each phase can use a different model. Triage context is passed to the analysis agent via the user message.
 
 ---
 
