@@ -77,8 +77,9 @@ An autonomous bot that watches a GitHub repository, analyzes new issues with AI,
 | [#22](../../issues/22) | Graceful shutdown (SIGTERM handling) | Open |
 | [#31](../../issues/31) | Enrich action tracking with full response metadata | Open |
 | [#32](../../issues/32) | Retract command (`deepagents retract --issue N`) | Open |
+| [#33](../../issues/33) | Structured logging (tool calls, timing, workflow steps) | Open |
 
-**Milestone:** Transient API failures are retried. Container stops don't lose work. Agent actions can be retracted by humans via CLI.
+**Milestone:** Transient API failures are retried. Container stops don't lose work. Agent actions can be retracted by humans via CLI. Tool calls are logged with arguments and timing.
 
 ---
 
