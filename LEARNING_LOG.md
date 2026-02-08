@@ -3461,3 +3461,69 @@ The v0.3.0 CHANGELOG entry should note: "Phase 2 (Safety & Idempotency) + Phase 
 | 6 | `runAnalyzeSingle` has no circuit breaker | Low | This entry |
 
 ---
+
+## Entry 23: Closing the Loop -- Committing Code and Self-Review (Issues #25, #27)
+
+**Date:** 2026-02-08
+**Author:** Architect Agent
+
+### The gap: empty PRs
+
+After Phase 1-3, the agent could analyze issues, comment, create branches, and open PRs — but the PRs were always empty. The agent had no tool to commit files to a branch. It could *read* the codebase but not *write back* to it.
+
+### The fix: `create_or_update_file` tool (Issue #25)
+
+Added a new tool using `octokit.rest.repos.createOrUpdateFileContents()`. This GitHub API endpoint creates or updates a single file in a single commit. Key design choices:
+
+1. **Full file content, not diffs.** The agent writes the complete file content, not a patch. This is simpler for the LLM (no diff format to get wrong) and matches the GitHub API's model.
+2. **Auto-detects create vs update.** The tool checks if the file exists on the branch. If it does, it includes the existing SHA (required by GitHub for updates). If not, it creates the file.
+3. **One commit per call.** Each tool invocation creates one commit. Multi-file changes require multiple calls. This is simple but verbose in git history — acceptable for a learning project.
+
+The tool follows all existing patterns: circuit breaker wrapping, dry-run stub, Zod schema validation.
+
+### The self-review step (Issue #27)
+
+With the agent now able to commit code, a new risk appeared: hallucinated code. The agent might invent imports, functions, or APIs that don't exist in the codebase.
+
+**First attempt:** Hard constraints — "NEVER add new dependencies", "ONLY use existing patterns." This was too restrictive. Adding dependencies is a legitimate part of coding. Some issues require new libraries.
+
+**Corrected approach:** Soft self-review. After committing, the agent reads back its changes and sanity-checks them:
+- Do imports resolve to real modules?
+- Do function calls match actual signatures?
+- Are new dependencies justified?
+
+If something is clearly wrong, the agent fixes it. Otherwise, it notes what it checked in the PR body.
+
+### Why soft, not hard?
+
+The project architecture already has the answer: the **PR reviewer bot** (Phase 8) is the real gate. The self-review is a lightweight first pass that catches obvious mistakes. Hard constraints in the analyzer bot would block legitimate fixes. The design philosophy is:
+- **Issue handler** (this project) = proposes freely
+- **PR reviewer** (Phase 8) = catches problems
+- **Human** = makes the final merge decision
+
+This is a three-layer defense: self-review → reviewer bot → human. Each layer catches what the previous one missed.
+
+### The 7-step workflow
+
+The agent's workflow is now:
+1. **Analyze** — read issue + relevant source files
+2. **Comment** — post summary on the issue
+3. **Document** — write detailed analysis to `./issues/`
+4. **Branch** — create feature branch
+5. **Commit** — push proposed changes to the branch
+6. **Self-review** — read back, sanity-check, fix if needed
+7. **PR** — open draft PR with analysis + self-review notes
+
+### Teaching moment: prompt constraints vs code constraints vs architecture constraints
+
+This session surfaced three layers of enforcement:
+
+| Layer | Example | Strength | When to use |
+|-------|---------|----------|-------------|
+| **Prompt** | "Prefer existing patterns" | Weak — LLM can ignore | Style guidance, soft preferences |
+| **Code** | `maxIssuesPerRun` clamped in tool constructor | Strong — cannot be bypassed | Correctness-critical limits |
+| **Architecture** | Reviewer bot as separate gate | Strongest — separate system | Safety-critical validation |
+
+The mistake is using prompts for things that need code enforcement, or code for things that need architectural separation. The self-review is correctly a prompt-level concern (it's advisory). The circuit breaker is correctly code-level (it's a hard limit). The reviewer bot is correctly architectural (it's a separate trust boundary).
+
+---
