@@ -4319,3 +4319,56 @@ The logging wrapper accepts an optional `ToolCallCounter` to display headroom (`
 The issue explicitly calls out that tool **responses** should not be logged. For tools like `read_repo_file`, the response is an entire file's contents -- logging it would flood the terminal and duplicate data that is already visible in the LLM's context. Arguments are small (a file path, a branch name), so they provide useful debugging context without volume.
 
 ---
+
+## Entry 30: Retry with Exponential Backoff -- Making API Calls Resilient (Issue #17)
+
+**Date:** 2026-02-08
+**Author:** Builder Agent
+**Scope:** New `src/utils.ts` module, `withRetry()` wrapper applied to all GitHub API calls in `github-tools.ts`
+
+### Why This Design
+
+GitHub API calls fail transiently for many reasons: rate limits (429), server errors (5xx), and network hiccups (ECONNRESET, ETIMEDOUT). Without retry logic, a single transient failure kills the entire poll cycle. For a cron-triggered system that runs unattended, silent failures are worse than slow retries.
+
+### Key Design Decisions
+
+**1. Retry classification -- what to retry and what not to:**
+- Retry: HTTP 5xx (server errors), 429 (rate limit), network errors (ECONNRESET, ETIMEDOUT, ENOTFOUND, EAI_AGAIN, EPIPE)
+- Do NOT retry: 4xx client errors (except 429) -- these are permanent failures (bad auth, not found, validation errors)
+- The classifier (`isRetryableError`) checks both `error.status` (Octokit HTTP responses) and `error.code` (Node.js network errors)
+
+**2. Exponential backoff with Retry-After:**
+- Default: 3 retries with backoff multiplier of 2 (delays: 1s, 2s, 4s = 7s total worst case)
+- On 429 responses, the `Retry-After` header (seconds) overrides the computed backoff -- this respects GitHub's rate limit reset timing
+- `getRetryAfterMs()` extracts and converts the header value, returning `null` if absent or invalid
+
+**3. Architectural placement -- innermost wrapper:**
+The retry wrapper sits closest to the Octokit call, inside the LangChain tool function. The layer ordering (inside out) is:
+1. `withRetry()` -- retries transient Octokit failures
+2. Idempotency check -- skips duplicate operations (comment/branch/PR)
+3. Circuit breaker -- caps total tool calls per agent run
+4. Dry-run wrapper -- swaps write tools with logging stubs
+
+This ordering matters: retries are invisible to the circuit breaker (a call that succeeds after 2 retries counts as 1 tool call, not 3). If retry were outside the circuit breaker, retries would eat into the tool call budget.
+
+**4. Transparent wrapping -- no changes to tool interfaces:**
+Every `await octokit.rest.*()` call becomes `await withRetry(() => octokit.rest.*())`. The tool's input/output schema is unchanged. The retry logic is invisible to the LLM agent -- it just sees success or failure.
+
+### Test Strategy
+
+18 unit tests in `tests/utils.test.ts`:
+- `isRetryableError`: 10 tests covering 5xx, 429, 4xx rejection, network error codes, null/undefined/non-objects
+- `withRetry`: 8 tests covering success on first try, success after retries, max retries exhausted, non-retryable immediate throw, Retry-After header respect, default options, custom options
+
+Fake timers (`vi.useFakeTimers()`) control the backoff delays. The `.catch(e => e)` pattern avoids unhandled promise rejections when testing failure paths with fake timers.
+
+One existing test in `github-tools.test.ts` was updated: the "re-throws non-404 errors from existence check" test changed from status 500 to 403 because 500 is now retryable (would cause timeout as `withRetry` retries with real delays).
+
+### What This Does NOT Cover
+
+- Per-endpoint retry budgets (all endpoints share the same default)
+- Jitter (randomized backoff to avoid thundering herd)
+- Retry logging to structured output (currently uses `console.log`)
+- Integration with the circuit breaker counter (retries are invisible to it -- by design)
+
+These are reasonable future enhancements but not needed for the current learning project scope.

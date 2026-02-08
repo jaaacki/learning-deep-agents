@@ -9,6 +9,22 @@
 
 ---
 
+## v0.3.4 — 2026-02-08
+
+### Added
+- **Retry with exponential backoff** (Issue #17) — all GitHub API calls now retry on transient failures
+- New `src/utils.ts` with `withRetry()` utility, `isRetryableError()` classifier, `getRetryAfterMs()` helper
+- Retries on: HTTP 5xx, 429 (rate limit with Retry-After header), network errors (ECONNRESET, ETIMEDOUT, etc.)
+- Does NOT retry 4xx client errors (except 429)
+- Default: 3 retries with exponential backoff (1s, 2s, 4s)
+- All Octokit API calls in `github-tools.ts` wrapped with `withRetry()`
+- 18 new tests in `tests/utils.test.ts`
+
+### Changed
+- `tests/github-tools.test.ts` branch error test uses 403 (non-retryable) instead of 500
+
+---
+
 ## v0.3.3 — 2026-02-08
 
 ### Added
