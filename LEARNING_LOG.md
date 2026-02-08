@@ -5414,3 +5414,49 @@ Personal Access Tokens (PATs) are the simplest way to authenticate with GitHub's
 - `github-tools.ts`: `createGitHubClient()` accepts `string | GitHubAppAuth`. New `getAuthFromConfig()` helper.
 - `agent.ts`, `triage-agent.ts`, `core.ts`: All updated to use `getAuthFromConfig()` instead of raw `token`.
 - 8 new tests covering all validation paths and both auth modes.
+
+## Entry 44: PR Reviewer Bot -- Closing the Feedback Loop (Issues #15, #16)
+
+**Date:** 2026-02-09
+**Author:** Builder Agent
+**Issues:** #15 -- PR review agent, #16 -- submit_pr_review tool
+
+### Why a reviewer bot?
+
+The deepagents pipeline creates draft PRs for every issue it analyzes. But who reviews those PRs? Without automated review, a human must manually check every bot-generated PR -- defeating the purpose of automation.
+
+The reviewer bot closes the feedback loop: the analysis agent creates a PR, and the reviewer agent immediately reviews it. This gives humans a second opinion before they look at the PR, catching obvious issues early.
+
+### Key design decisions
+
+**COMMENT-only reviews.** The `submit_pr_review` tool hardcodes `event: 'COMMENT'` regardless of what the LLM tries to send. This is a code-enforced constraint, not a prompt-based one. The tool literally ignores any event the LLM might try to set. Why? An autonomous bot should never approve its own work or block merging -- those are human decisions.
+
+**Idempotency via HTML marker.** Same pattern as `comment_on_issue` (Entry 8). The `<!-- deep-agent-review -->` marker in the review body prevents duplicate reviews if the webhook fires twice or the CLI is run manually after a webhook-triggered review.
+
+**Automated footer.** Every review ends with "This is an automated review by deep-agents. A human should verify before merging." This is hardcoded in the tool, not in the prompt. Prompt-based constraints can be ignored; code-enforced constraints cannot.
+
+**Separate agent, not an extra step.** The reviewer runs as its own agent (`createReviewerAgent`) rather than being bolted onto the analysis agent's workflow. This keeps concerns separate: the analysis agent focuses on understanding issues and proposing fixes, while the reviewer focuses on evaluating code changes. Each has its own system prompt, tool set, and circuit breaker.
+
+**Optional model override.** Like `triageLlm`, the reviewer supports `reviewerLlm` in config. This lets operators use a cheaper model for reviewing (most reviews are simpler than full analysis) or a different model to get diverse perspectives.
+
+### Two trigger paths
+
+1. **Webhook (automatic):** `handlePullRequestEvent()` detects bot-created PRs (via HTML marker or branch pattern) and calls `runReviewSingle()`. The review happens within seconds of PR creation.
+2. **CLI (manual):** `deepagents review --pr N` lets humans trigger a review on any PR. Useful for re-reviewing after force-pushes or testing the reviewer in isolation.
+
+### What the reviewer sees
+
+The reviewer agent has three tools:
+- `get_pr_diff` -- fetches the unified diff (truncated at 50k chars for LLM context budget)
+- `read_repo_file` -- reads source files for context (reuses the existing tool)
+- `submit_pr_review` -- posts the review with optional inline comments
+
+The system prompt asks it to: read the diff, read relevant files, evaluate the approach, and post a review with specific inline comments where relevant. It's instructed to be constructive and not nitpick style.
+
+### What changed
+
+- `github-tools.ts`: Two new tool factories (`createGetPrDiffTool`, `createSubmitPrReviewTool`)
+- `reviewer-agent.ts`: New file with agent factory and `runReviewSingle()` entry point
+- `listener.ts`: `handlePullRequestEvent()` now async, calls reviewer instead of logging stub
+- `cli.ts`: New `review --pr N` subcommand
+- 12 new tests for the tools, 2 updated listener tests for reviewer integration

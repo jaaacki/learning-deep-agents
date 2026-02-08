@@ -64,6 +64,18 @@ export function loadConfig() {
     }
   }
 
+  // Validate reviewerLlm if present (optional -- falls back to main llm)
+  if (config.reviewerLlm) {
+    if (!config.reviewerLlm.provider) {
+      console.error('❌ reviewerLlm.provider is required when reviewerLlm is specified');
+      process.exit(1);
+    }
+    if (!config.reviewerLlm.apiKey && !localProviders.includes(config.reviewerLlm.provider)) {
+      console.error('❌ Missing reviewerLlm API key');
+      process.exit(1);
+    }
+  }
+
   // Validate webhook config if present (optional -- only needed for `deepagents webhook`)
   if (config.webhook) {
     if (typeof config.webhook.port !== 'number' || config.webhook.port < 1 || config.webhook.port > 65535) {

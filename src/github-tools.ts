@@ -399,3 +399,111 @@ export function createDryRunCreateOrUpdateFileTool() {
     { name: 'create_or_update_file', description: 'Create or update a file on a branch. (DRY RUN MODE: will log but not execute)', schema: z.object({ path: z.string().describe('File path in the repo'), content: z.string().describe('The full file content to write'), message: z.string().describe('Git commit message'), branch: z.string().describe('The branch to commit to') }) }
   );
 }
+
+// ── PR review tools ──────────────────────────────────────────────────────────
+
+export const BOT_REVIEW_MARKER = '<!-- deep-agent-review -->';
+const REVIEW_FOOTER = '\n\n> This is an automated review by deep-agents. A human should verify before merging.';
+
+/**
+ * Tool: Fetch a PR diff as a unified diff string.
+ */
+export function createGetPrDiffTool(octokit: Octokit, owner: string, repo: string) {
+  return tool(
+    async ({ pull_number }: { pull_number: number }) => {
+      try {
+        console.log(`\u{1F50D} Fetching diff for PR #${pull_number} in ${owner}/${repo}...`);
+        const { data } = await withRetry(() => octokit.rest.pulls.get({
+          owner,
+          repo,
+          pull_number,
+          mediaType: { format: 'diff' },
+        }));
+        // When format: 'diff' is used, data comes back as a string
+        const diff = data as unknown as string;
+        const MAX_DIFF_LENGTH = 50000;
+        if (diff.length > MAX_DIFF_LENGTH) {
+          return diff.slice(0, MAX_DIFF_LENGTH) + `\n\n... (diff truncated at ${MAX_DIFF_LENGTH} characters, total: ${diff.length})`;
+        }
+        return diff;
+      } catch (error) {
+        return `Error fetching diff for PR #${pull_number}: ${error}`;
+      }
+    },
+    {
+      name: 'get_pr_diff',
+      description: 'Fetch the unified diff for a pull request. Returns the diff as text. Large diffs are truncated to 50000 characters.',
+      schema: z.object({
+        pull_number: z.number().describe('The pull request number'),
+      }),
+    }
+  );
+}
+
+/**
+ * Tool: Submit a PR review (always forced to COMMENT event).
+ * Includes idempotency check: skips if a review with the bot marker already exists.
+ */
+export function createSubmitPrReviewTool(octokit: Octokit, owner: string, repo: string) {
+  return tool(
+    async ({ pull_number, body, comments }: {
+      pull_number: number;
+      body: string;
+      comments?: Array<{ path: string; line: number; body: string }>;
+    }) => {
+      try {
+        console.log(`\u{1F4DD} Submitting review on PR #${pull_number} in ${owner}/${repo}...`);
+
+        // Idempotency check: look for existing review with our marker
+        const { data: existingReviews } = await withRetry(() => octokit.rest.pulls.listReviews({
+          owner, repo, pull_number, per_page: 100,
+        }));
+        const alreadyReviewed = existingReviews.some((r) => r.body?.includes(BOT_REVIEW_MARKER));
+        if (alreadyReviewed) {
+          console.log(`\u{26A0}\uFE0F  Skipping review on PR #${pull_number} -- bot review already exists.`);
+          return JSON.stringify({ skipped: true, reason: 'Bot review already exists on this PR.', pull_number });
+        }
+
+        // Build the review body with marker and footer
+        const markedBody = `${BOT_REVIEW_MARKER}\n${body}${REVIEW_FOOTER}`;
+
+        // HARDCODE event to COMMENT -- never APPROVE or REQUEST_CHANGES
+        const reviewParams: Parameters<typeof octokit.rest.pulls.createReview>[0] = {
+          owner, repo, pull_number, body: markedBody, event: 'COMMENT',
+        };
+
+        // Add inline comments if provided
+        if (comments && comments.length > 0) {
+          reviewParams.comments = comments.map((c) => ({
+            path: c.path,
+            line: c.line,
+            body: c.body,
+          }));
+        }
+
+        const { data: review } = await withRetry(() => octokit.rest.pulls.createReview(reviewParams));
+        return JSON.stringify({
+          id: review.id,
+          html_url: review.html_url,
+          state: review.state,
+          pull_number,
+        });
+      } catch (error) {
+        return `Error submitting review on PR #${pull_number}: ${error}`;
+      }
+    },
+    {
+      name: 'submit_pr_review',
+      description: 'Submit a review on a pull request. Always posts as a COMMENT (never approves or requests changes). Automatically skips if a bot review already exists (idempotent). Include inline comments for specific file/line feedback.',
+      schema: z.object({
+        pull_number: z.number().describe('The pull request number to review'),
+        body: z.string().describe('The review summary (Markdown supported)'),
+        comments: z.array(z.object({
+          path: z.string().describe('Relative file path in the repo'),
+          line: z.number().describe('Line number in the diff to comment on'),
+          body: z.string().describe('The inline comment text'),
+        })).optional().describe('Optional inline comments on specific files/lines'),
+      }),
+    }
+  );
+}

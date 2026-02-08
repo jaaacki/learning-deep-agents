@@ -15,7 +15,12 @@ vi.mock('../src/core.js', () => ({
   runAnalyzeSingle: vi.fn().mockResolvedValue(undefined),
 }));
 
+vi.mock('../src/reviewer-agent.js', () => ({
+  runReviewSingle: vi.fn().mockResolvedValue(undefined),
+}));
+
 import { runAnalyzeSingle } from '../src/core.js';
+import { runReviewSingle } from '../src/reviewer-agent.js';
 
 // ── verifySignature ──────────────────────────────────────────────────────────
 
@@ -307,6 +312,7 @@ describe('handlePullRequestEvent', () => {
   beforeEach(() => {
     vi.spyOn(console, 'log').mockImplementation(() => {});
     vi.spyOn(console, 'error').mockImplementation(() => {});
+    vi.mocked(runReviewSingle).mockReset().mockResolvedValue(undefined);
   });
 
   afterEach(() => {
@@ -343,34 +349,43 @@ describe('handlePullRequestEvent', () => {
     };
   }
 
-  it('queues bot-created PR (marker in body) for review', () => {
+  it('queues bot-created PR (marker in body) for review', async () => {
     const event = makeEvent({ payload: makePrPayload({ body: `text ${BOT_PR_MARKER} text` }) });
-    const result = handlePullRequestEvent(event);
+    const result = await handlePullRequestEvent(event);
 
     expect(result.handled).toBe(true);
     expect(result.reviewQueued).toBe(true);
-    expect(result.reason).toContain('Issue #15');
+    expect(result.reason).toContain('Review triggered');
     expect(result.pr?.number).toBe(99);
   });
 
-  it('queues bot-created PR (branch pattern) for review', () => {
+  it('queues bot-created PR (branch pattern) for review', async () => {
     const event = makeEvent({
       payload: makePrPayload({ body: 'no marker', headRef: 'issue-10-add-tests' }),
     });
-    const result = handlePullRequestEvent(event);
+    const result = await handlePullRequestEvent(event);
 
     expect(result.handled).toBe(true);
     expect(result.reviewQueued).toBe(true);
   });
 
-  it('ignores non-bot PR', () => {
+  it('triggers review when config is provided', async () => {
+    const config = { github: { owner: 'o', repo: 'r', token: 't' }, llm: { provider: 'anthropic', apiKey: 'k', model: 'm' } } as any;
+    const event = makeEvent({ payload: makePrPayload() });
+    const result = await handlePullRequestEvent(event, config);
+
+    expect(result.reviewQueued).toBe(true);
+    expect(runReviewSingle).toHaveBeenCalledWith(config, 99);
+  });
+
+  it('ignores non-bot PR', async () => {
     const event = makeEvent({
       payload: makePrPayload({
         body: 'Regular PR from a human',
         headRef: 'feature/my-change',
       }),
     });
-    const result = handlePullRequestEvent(event);
+    const result = await handlePullRequestEvent(event);
 
     expect(result.handled).toBe(true);
     expect(result.reviewQueued).toBe(false);
@@ -378,26 +393,26 @@ describe('handlePullRequestEvent', () => {
     expect(result.pr?.number).toBe(99);
   });
 
-  it('ignores pull_request.closed action', () => {
+  it('ignores pull_request.closed action', async () => {
     const event = makeEvent({ payload: makePrPayload({ action: 'closed' }) });
-    const result = handlePullRequestEvent(event);
+    const result = await handlePullRequestEvent(event);
 
     expect(result.handled).toBe(false);
     expect(result.reviewQueued).toBe(false);
     expect(result.reason).toContain('Ignored action: closed');
   });
 
-  it('ignores pull_request.synchronize action', () => {
+  it('ignores pull_request.synchronize action', async () => {
     const event = makeEvent({ payload: makePrPayload({ action: 'synchronize' }) });
-    const result = handlePullRequestEvent(event);
+    const result = await handlePullRequestEvent(event);
 
     expect(result.handled).toBe(false);
     expect(result.reason).toContain('Ignored action: synchronize');
   });
 
-  it('handles missing pull_request in payload gracefully', () => {
+  it('handles missing pull_request in payload gracefully', async () => {
     const event = makeEvent({ payload: { action: 'opened' } });
-    const result = handlePullRequestEvent(event);
+    const result = await handlePullRequestEvent(event);
 
     expect(result.handled).toBe(false);
     expect(result.reason).toBe('Missing PR data in payload');
@@ -406,20 +421,20 @@ describe('handlePullRequestEvent', () => {
     );
   });
 
-  it('handles pull_request with missing number gracefully', () => {
+  it('handles pull_request with missing number gracefully', async () => {
     const event = makeEvent({
       payload: {
         action: 'opened',
         pull_request: { title: 'No number field' },
       },
     });
-    const result = handlePullRequestEvent(event);
+    const result = await handlePullRequestEvent(event);
 
     expect(result.handled).toBe(false);
     expect(result.reason).toBe('Missing PR data in payload');
   });
 
-  it('extracts PR metadata correctly', () => {
+  it('extracts PR metadata correctly', async () => {
     const event = makeEvent({
       payload: makePrPayload({
         number: 55,
@@ -430,7 +445,7 @@ describe('handlePullRequestEvent', () => {
         draft: false,
       }),
     });
-    const result = handlePullRequestEvent(event);
+    const result = await handlePullRequestEvent(event);
 
     expect(result.pr).toEqual({
       number: 55,
@@ -442,12 +457,19 @@ describe('handlePullRequestEvent', () => {
     });
   });
 
-  it('returns reviewQueued: true with clear "not implemented" indicator', () => {
+  it('handles review errors without crashing', async () => {
+    vi.mocked(runReviewSingle).mockRejectedValueOnce(new Error('LLM down'));
+    const config = { github: { owner: 'o', repo: 'r', token: 't' }, llm: { provider: 'anthropic', apiKey: 'k', model: 'm' } } as any;
     const event = makeEvent({ payload: makePrPayload() });
-    const result = handlePullRequestEvent(event);
 
+    const result = await handlePullRequestEvent(event, config);
+
+    expect(result.handled).toBe(true);
     expect(result.reviewQueued).toBe(true);
-    expect(result.reason).toMatch(/not implemented/i);
+    expect(console.error).toHaveBeenCalledWith(
+      expect.stringContaining('Review failed'),
+      expect.any(Error),
+    );
   });
 });
 

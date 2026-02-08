@@ -9,6 +9,35 @@
 
 ---
 
+## v1.0.0 — 2026-02-09
+
+**Milestone: Phase 8 (Reviewer Bot) complete. Project v1.0.0!** The agent can now review its own PRs. Bot-created PRs are automatically reviewed via webhook, or manually via `deepagents review --pr N`.
+
+### Added
+- **PR review agent** (Issue #15) -- autonomous code reviewer for bot-created PRs
+- New `src/reviewer-agent.ts` with `createReviewerAgent()` factory and `runReviewSingle()` entry point
+- Reviewer reads PR diff, examines source files for context, and posts a structured review
+- System prompt instructs: evaluate approach, find bugs/risks, suggest improvements, never approve/merge
+- `reviewerLlm` optional config field for using a different model for reviews (like `triageLlm`)
+- Circuit breaker (15 tool calls) and structured logging on all reviewer tools
+- **`submit_pr_review` tool** (Issue #16) -- post a review on a GitHub pull request
+- Event HARDCODED to `COMMENT` -- the tool can never approve or request changes, even if the LLM tries
+- `<!-- deep-agent-review -->` HTML marker for idempotency (skips if bot already reviewed)
+- Automated footer: "This is an automated review by deep-agents. A human should verify before merging."
+- Inline comment support: `comments` array with `{ path, line, body }` for line-level feedback
+- **`get_pr_diff` tool** -- fetch unified diff for a PR via Octokit (truncated at 50k chars)
+- **`deepagents review --pr N`** CLI subcommand for manual PR review
+- 12 new tests in `tests/reviewer-agent.test.ts`: diff tool, review tool, idempotency, COMMENT enforcement, inline comments
+
+### Changed
+- `handlePullRequestEvent()` now triggers the reviewer agent (was a stub logging "not implemented")
+- `handlePullRequestEvent()` is now async and accepts optional `Config` parameter
+- `handleWebhookEvent()` passes config to PR handler (enables review on webhook delivery)
+- Removed `PrReviewStub` interface (replaced by the real reviewer agent)
+- Updated `listener.test.ts` with reviewer mock and async test patterns (2 new tests: config trigger, error handling)
+
+---
+
 ## v0.7.0 — 2026-02-09
 
 **Milestone: Phase 7 (Deployment) complete.** Docker stack with Caddy reverse proxy. GitHub App authentication support alongside PAT.

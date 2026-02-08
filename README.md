@@ -18,13 +18,19 @@ cron  -->  poll.sh  -->  pnpm start  -->  Triage (cheap/fast)
                                                     +--> 5. Create branch + commit proposed fix
                                                     +--> 6. Self-review committed changes
                                                     +--> 7. Open draft PR
+                                                              |
+                                                              +--> Reviewer Agent (automatic)
+                                                                    +--> Fetch PR diff
+                                                                    +--> Read source files for context
+                                                                    +--> Post review (COMMENT only)
 ```
 
-The agent never merges PRs. It only proposes fixes as drafts.
+The agent never merges PRs. It only proposes fixes as drafts. The reviewer agent posts a COMMENT review -- it never approves or requests changes.
 
 Alternatively, use the webhook listener for real-time processing:
 ```
-GitHub  --webhook-->  deepagents webhook  -->  Triage + Analysis
+GitHub  --webhook-->  deepagents webhook  -->  issues.opened  --> Triage + Analysis
+                                          -->  pull_request.opened --> Reviewer Agent
 ```
 
 ## CLI Usage
@@ -49,6 +55,9 @@ pnpm run cli analyze --issue 42
 
 # Triage a single issue (cheap/fast classification)
 pnpm run cli triage --issue 42
+
+# Review a pull request (fetch diff, analyze, post review comment)
+pnpm run cli review --pr 10
 
 # Retract all agent actions on an issue (close PR, delete branch, delete comment)
 pnpm run cli retract --issue 42
@@ -233,21 +242,22 @@ pnpm test
 pnpm run test:watch
 ```
 
-221 tests across 8 test files using [vitest](https://vitest.dev/) with mocked external dependencies (Octokit, LLM constructors, filesystem). No real API calls are made during testing.
+246 tests across 9 test files using [vitest](https://vitest.dev/) with mocked external dependencies (Octokit, LLM constructors, filesystem). No real API calls are made during testing.
 
 ## File Structure
 
 ```
 deepagents/
   src/
-    cli.ts            -- CLI entry point (subcommands: poll, analyze, triage, webhook, status)
+    cli.ts            -- CLI entry point (subcommands: poll, analyze, triage, review, webhook, status)
     core.ts           -- Shared logic (poll cycle, state management, graceful shutdown)
     index.ts          -- Original entry point (thin wrapper, backwards-compatible)
     config.ts         -- Loads and validates config.json (GitHub + LLM + webhook)
     model.ts          -- LLM provider factory (Anthropic, OpenAI, Ollama, etc.)
-    github-tools.ts   -- GitHub API tools (fetch, list files, comment, branch, PR, commit)
+    github-tools.ts   -- GitHub API tools (fetch, list files, comment, branch, PR, commit, review)
     agent.ts          -- Creates the analysis agent with tools + system prompt
     triage-agent.ts   -- Triage agent (cheap model, read-only tools, issue classification)
+    reviewer-agent.ts -- PR reviewer agent (diff reader, source context, review submitter)
     logger.ts         -- Structured logging wrapper for tool calls
     utils.ts          -- Retry with exponential backoff for API calls
     listener.ts       -- Express webhook server with HMAC-SHA256 verification
@@ -257,6 +267,7 @@ deepagents/
     model.test.ts     -- Provider routing tests (mocked LLM constructors)
     config.test.ts    -- Config validation tests (mocked fs, process.exit)
     triage-agent.test.ts -- Triage agent parsing and config tests
+    reviewer-agent.test.ts -- PR review tool and diff tool tests
     logger.test.ts    -- Structured logging wrapper tests
     utils.test.ts     -- Retry logic and error classification tests
     listener.test.ts  -- Webhook endpoint and signature verification tests

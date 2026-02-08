@@ -3,6 +3,7 @@
 import { loadConfig } from './config.js';
 import { runPollCycle, runAnalyzeSingle, runTriageSingle, showStatus, retractIssue, requestShutdown } from './core.js';
 import { startWebhookServer } from './listener.js';
+import { runReviewSingle } from './reviewer-agent.js';
 
 // ── Signal handlers for graceful shutdown ────────────────────────────────────
 
@@ -34,6 +35,7 @@ Commands:
   poll              Run a poll cycle: fetch, analyze, comment, branch, PR
   analyze           Analyze a single issue by number
   triage            Run triage on a single issue (classify without side effects)
+  review            Review a pull request (fetch diff, analyze, post review comment)
   retract           Undo agent actions on an issue (close PR, delete branch, delete comment)
   webhook           Start the HTTP webhook listener for GitHub events
   status            Show current polling state
@@ -51,6 +53,9 @@ Options for 'analyze':
 Options for 'triage':
   --issue N         Issue number to triage (required)
 
+Options for 'review':
+  --pr N            Pull request number to review (required)
+
 Options for 'retract':
   --issue N         Issue number to retract (required)
 
@@ -61,6 +66,7 @@ Examples:
   deepagents poll --max-issues 3
   deepagents analyze --issue 42
   deepagents triage --issue 42
+  deepagents review --pr 10
   deepagents retract --issue 42
   deepagents webhook
   deepagents status
@@ -84,6 +90,8 @@ function parseArgs(argv: string[]): { command: string; flags: Record<string, str
       flags['max-tool-calls'] = args[++i];
     } else if (arg === '--issue' && i + 1 < args.length) {
       flags['issue'] = args[++i];
+    } else if (arg === '--pr' && i + 1 < args.length) {
+      flags['pr'] = args[++i];
     } else {
       console.error(`Unknown option: ${arg}`);
       console.log(USAGE);
@@ -164,6 +172,25 @@ async function main() {
 
       console.log('\u{1F916} Deep Agents Triage\n');
       await runTriageSingle(config, triageIssueNumber);
+      break;
+    }
+
+    case 'review': {
+      const prStr = flags['pr'];
+      if (!prStr || typeof prStr !== 'string') {
+        console.error('--pr N is required for the review command');
+        console.log('\nUsage: deepagents review --pr 10');
+        process.exit(1);
+      }
+
+      const prNumber = parseInt(prStr, 10);
+      if (isNaN(prNumber) || prNumber < 1) {
+        console.error('--pr must be a positive integer');
+        process.exit(1);
+      }
+
+      console.log('\u{1F916} Deep Agents PR Reviewer\n');
+      await runReviewSingle(config, prNumber);
       break;
     }
 

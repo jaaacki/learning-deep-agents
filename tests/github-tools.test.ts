@@ -9,6 +9,9 @@ import {
   createDryRunCommentTool,
   createDryRunBranchTool,
   createDryRunPullRequestTool,
+  createGetPrDiffTool,
+  createSubmitPrReviewTool,
+  BOT_REVIEW_MARKER,
   ToolCallCounter,
   CircuitBreakerError,
   wrapWithCircuitBreaker,
@@ -37,6 +40,9 @@ function createMockOctokit(overrides: Record<string, any> = {}) {
       pulls: {
         list: vi.fn(),
         create: vi.fn(),
+        get: vi.fn(),
+        listReviews: vi.fn(),
+        createReview: vi.fn(),
       },
       repos: {
         getContent: vi.fn(),
@@ -551,5 +557,146 @@ describe('createGitHubClient', () => {
     expect(fs.readFileSync).toHaveBeenCalledWith('/tmp/fake-key.pem', 'utf-8');
 
     vi.mocked(fs.readFileSync).mockRestore();
+  });
+});
+
+// ── PR diff tool ────────────────────────────────────────────────────────────
+
+describe('createGetPrDiffTool', () => {
+  let octokit: ReturnType<typeof createMockOctokit>;
+
+  beforeEach(() => {
+    octokit = createMockOctokit();
+  });
+
+  it('returns PR diff as text', async () => {
+    const diffText = 'diff --git a/file.ts b/file.ts\n--- a/file.ts\n+++ b/file.ts\n@@ -1 +1 @@\n-old\n+new';
+    octokit.rest.pulls.get.mockResolvedValue({ data: diffText });
+
+    const tool = createGetPrDiffTool(octokit, 'owner', 'repo');
+    const result = await tool.invoke({ pull_number: 10 });
+
+    expect(result).toBe(diffText);
+    expect(octokit.rest.pulls.get).toHaveBeenCalledWith({
+      owner: 'owner', repo: 'repo', pull_number: 10,
+      mediaType: { format: 'diff' },
+    });
+  });
+
+  it('truncates diffs over 50000 characters', async () => {
+    const longDiff = 'x'.repeat(60000);
+    octokit.rest.pulls.get.mockResolvedValue({ data: longDiff });
+
+    const tool = createGetPrDiffTool(octokit, 'owner', 'repo');
+    const result = await tool.invoke({ pull_number: 5 });
+
+    expect(result.length).toBeLessThan(60000);
+    expect(result).toContain('truncated');
+    expect(result).toContain('60000');
+  });
+
+  it('returns error message on API failure', async () => {
+    octokit.rest.pulls.get.mockRejectedValue(new Error('Not found'));
+
+    const tool = createGetPrDiffTool(octokit, 'owner', 'repo');
+    const result = await tool.invoke({ pull_number: 999 });
+
+    expect(result).toContain('Error');
+    expect(result).toContain('999');
+  });
+});
+
+// ── PR review tool ──────────────────────────────────────────────────────────
+
+describe('createSubmitPrReviewTool', () => {
+  let octokit: ReturnType<typeof createMockOctokit>;
+
+  beforeEach(() => {
+    octokit = createMockOctokit();
+  });
+
+  it('submits a review and returns result', async () => {
+    octokit.rest.pulls.listReviews.mockResolvedValue({ data: [] });
+    octokit.rest.pulls.createReview.mockResolvedValue({
+      data: { id: 42, html_url: 'https://github.com/r/42', state: 'COMMENTED' },
+    });
+
+    const tool = createSubmitPrReviewTool(octokit, 'owner', 'repo');
+    const result = await tool.invoke({ pull_number: 10, body: 'Looks good!' });
+    const parsed = JSON.parse(result);
+
+    expect(parsed.id).toBe(42);
+    expect(parsed.state).toBe('COMMENTED');
+    expect(parsed.pull_number).toBe(10);
+
+    // Verify event is hardcoded to COMMENT
+    const createCall = octokit.rest.pulls.createReview.mock.calls[0][0];
+    expect(createCall.event).toBe('COMMENT');
+    expect(createCall.body).toContain(BOT_REVIEW_MARKER);
+  });
+
+  it('skips review when bot review already exists (idempotent)', async () => {
+    octokit.rest.pulls.listReviews.mockResolvedValue({
+      data: [{ id: 1, body: `Some review ${BOT_REVIEW_MARKER}` }],
+    });
+
+    const tool = createSubmitPrReviewTool(octokit, 'owner', 'repo');
+    const result = await tool.invoke({ pull_number: 10, body: 'New review' });
+    const parsed = JSON.parse(result);
+
+    expect(parsed.skipped).toBe(true);
+    expect(octokit.rest.pulls.createReview).not.toHaveBeenCalled();
+  });
+
+  it('includes inline comments when provided', async () => {
+    octokit.rest.pulls.listReviews.mockResolvedValue({ data: [] });
+    octokit.rest.pulls.createReview.mockResolvedValue({
+      data: { id: 50, html_url: 'https://github.com/r/50', state: 'COMMENTED' },
+    });
+
+    const tool = createSubmitPrReviewTool(octokit, 'owner', 'repo');
+    await tool.invoke({
+      pull_number: 10,
+      body: 'Review with inline comments',
+      comments: [
+        { path: 'src/main.ts', line: 5, body: 'Consider renaming this' },
+        { path: 'src/utils.ts', line: 12, body: 'Possible null pointer' },
+      ],
+    });
+
+    const createCall = octokit.rest.pulls.createReview.mock.calls[0][0];
+    expect(createCall.comments).toHaveLength(2);
+    expect(createCall.comments[0].path).toBe('src/main.ts');
+    expect(createCall.comments[1].line).toBe(12);
+  });
+
+  it('returns error message on API failure', async () => {
+    octokit.rest.pulls.listReviews.mockResolvedValue({ data: [] });
+    octokit.rest.pulls.createReview.mockRejectedValue(new Error('Forbidden'));
+
+    const tool = createSubmitPrReviewTool(octokit, 'owner', 'repo');
+    const result = await tool.invoke({ pull_number: 10, body: 'Review' });
+
+    expect(result).toContain('Error');
+    expect(result).toContain('10');
+  });
+
+  it('posts review when no existing reviews match marker', async () => {
+    octokit.rest.pulls.listReviews.mockResolvedValue({
+      data: [
+        { id: 1, body: 'Human review — no marker' },
+        { id: 2, body: 'Another human review' },
+      ],
+    });
+    octokit.rest.pulls.createReview.mockResolvedValue({
+      data: { id: 60, html_url: 'https://github.com/r/60', state: 'COMMENTED' },
+    });
+
+    const tool = createSubmitPrReviewTool(octokit, 'owner', 'repo');
+    const result = await tool.invoke({ pull_number: 10, body: 'Bot review' });
+    const parsed = JSON.parse(result);
+
+    expect(parsed.id).toBe(60);
+    expect(octokit.rest.pulls.createReview).toHaveBeenCalled();
   });
 });

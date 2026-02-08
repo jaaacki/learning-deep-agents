@@ -3,6 +3,7 @@ import express from 'express';
 import type { Request, Response } from 'express';
 import type { Config } from './config.js';
 import { runAnalyzeSingle } from './core.js';
+import { runReviewSingle } from './reviewer-agent.js';
 
 /**
  * Webhook listener configuration.
@@ -55,15 +56,6 @@ export interface PrHandlerResult {
 }
 
 /**
- * Stub interface for the future PR reviewer (Issue #15).
- * When the reviewer bot is implemented, it will satisfy this interface
- * and be wired into handlePullRequestEvent.
- */
-export interface PrReviewStub {
-  reviewPr(pr: PrOpenedData): Promise<void>;
-}
-
-/**
  * Check if a PR was created by this bot.
  * Uses two signals: the HTML marker in the PR body, or the branch naming convention.
  */
@@ -74,12 +66,12 @@ export function isBotPr(body: string, headRef: string): boolean {
 /**
  * Handle a pull_request.opened webhook event.
  *
- * - If the PR was created by the bot, log it as queued for review and return.
- *   (The actual reviewer bot will be added in Issue #15.)
+ * - If the PR was created by the bot, trigger the reviewer agent.
  * - If the PR was NOT created by the bot, ignore it.
- * - Returns immediately (fire-and-forget pattern for the webhook endpoint).
+ * - Config is optional: when provided and the PR is bot-created, the
+ *   reviewer agent runs asynchronously (fire-and-forget).
  */
-export function handlePullRequestEvent(event: WebhookEvent): PrHandlerResult {
+export async function handlePullRequestEvent(event: WebhookEvent, config?: Config): Promise<PrHandlerResult> {
   const { payload } = event;
 
   if (payload.action !== 'opened') {
@@ -112,16 +104,27 @@ export function handlePullRequestEvent(event: WebhookEvent): PrHandlerResult {
     return { handled: true, reviewQueued: false, reason: 'PR not created by bot', pr: prData };
   }
 
-  // Bot-created PR — queue for review (stub until Issue #15)
+  // Bot-created PR — trigger the reviewer agent
   console.log(
     `[webhook] PR #${prData.number} "${prData.title}" queued for review ` +
-    `(delivery: ${event.deliveryId}) [reviewer not implemented yet]`,
+    `(delivery: ${event.deliveryId})`,
   );
+
+  if (config) {
+    try {
+      await runReviewSingle(config, prData.number);
+      console.log(`[webhook] Review complete for PR #${prData.number}`);
+    } catch (err) {
+      console.error(`[webhook] Review failed for PR #${prData.number}:`, err);
+    }
+  } else {
+    console.log(`[webhook] No config provided, skipping review for PR #${prData.number}`);
+  }
 
   return {
     handled: true,
     reviewQueued: true,
-    reason: 'Queued for review (reviewer not implemented yet — see Issue #15)',
+    reason: 'Review triggered',
     pr: prData,
   };
 }
@@ -182,7 +185,10 @@ export async function handleIssuesEvent(event: WebhookEvent, config?: Config): P
  */
 export function handleWebhookEvent(event: WebhookEvent, config?: Config): void {
   if (event.event === 'pull_request') {
-    handlePullRequestEvent(event);
+    // Fire-and-forget — don't await, just log errors
+    handlePullRequestEvent(event, config).catch((err) => {
+      console.error(`[webhook] PR handler error:`, err);
+    });
     return;
   }
 
