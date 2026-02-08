@@ -2,7 +2,7 @@ import fs from 'fs';
 import path from 'path';
 import type { Config } from './config.js';
 import { createDeepAgentWithGitHub } from './agent.js';
-import { CircuitBreakerError, createGitHubClient } from './github-tools.js';
+import { CircuitBreakerError, createGitHubClient, getAuthFromConfig } from './github-tools.js';
 import { withRetry } from './utils.js';
 import { runTriage } from './triage-agent.js';
 import type { TriageOutput } from './triage-agent.js';
@@ -384,8 +384,8 @@ async function fetchIssuesForPoll(
   maxIssues: number,
   sinceDate: string | null,
 ): Promise<Array<{ number: number; title: string; body: string; labels: string[] }>> {
-  const { owner, repo, token } = config.github;
-  const octokit = createGitHubClient(token);
+  const { owner, repo } = config.github;
+  const octokit = createGitHubClient(getAuthFromConfig(config.github));
 
   const params: Record<string, any> = {
     owner,
@@ -688,8 +688,8 @@ export async function fetchSingleIssue(
   config: Config,
   issueNumber: number,
 ): Promise<{ number: number; title: string; body: string; labels: string[] }> {
-  const { owner, repo, token } = config.github;
-  const octokit = createGitHubClient(token);
+  const { owner, repo } = config.github;
+  const octokit = createGitHubClient(getAuthFromConfig(config.github));
 
   const { data: issue } = await octokit.rest.issues.get({
     owner,
@@ -795,8 +795,8 @@ export interface RetractResult {
  * Partial retraction is supported -- if one step fails, the others still attempt.
  */
 export async function retractIssue(config: Config, issueNumber: number): Promise<RetractResult> {
-  const { owner, repo, token } = config.github;
-  const octokit = createGitHubClient(token);
+  const { owner, repo } = config.github;
+  const octokit = createGitHubClient(getAuthFromConfig(config.github));
 
   const pollState = loadPollState();
   if (!pollState) {

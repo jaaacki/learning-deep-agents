@@ -9,6 +9,25 @@
 
 ---
 
+## v0.6.2 — 2026-02-09
+
+### Added
+- **GitHub App authentication** (Issue #19) — migrate from PAT-only to support both PAT and GitHub App auth
+- `createGitHubClient()` now accepts either a PAT string or `GitHubAppAuth` object
+- `getAuthFromConfig()` helper extracts the correct auth mode from config
+- `GitHubAppAuth` interface exported for programmatic use
+- `@octokit/auth-app` added as production dependency
+- `*.pem` added to `.gitignore`
+- `config.json.example` updated with GitHub App field placeholders
+
+### Changed
+- Config validation: `github.token` is no longer required when App auth fields (`appId`, `privateKeyPath`, `installationId`) are provided
+- Partial App config (e.g., `appId` without `privateKeyPath`) is rejected with a clear error
+- Private key file existence is validated at config load time
+- All call sites (`agent.ts`, `triage-agent.ts`, `core.ts`) updated to use `getAuthFromConfig()`
+- 8 new tests: config validation (7) + GitHub App client creation (1)
+
+---
 ## v0.6.0 — 2026-02-09
 
 **Milestone: Phase 6 (Webhook & Real-Time) partially complete.** The webhook listener now dispatches `issues.opened` and `pull_request.opened` events. Issue #18 (persistent job queue) deferred — not needed for learning goals.

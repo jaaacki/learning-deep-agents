@@ -3,6 +3,7 @@ import type { Config } from './config.js';
 import { createModel } from './model.js';
 import {
   createGitHubClient,
+  getAuthFromConfig,
   createGitHubIssuesTool,
   createCommentOnIssueTool,
   createBranchTool,
@@ -25,10 +26,10 @@ import { wrapWithLogging } from './logger.js';
 export function createDeepAgentWithGitHub(config: Config, options: { maxIssues?: number; dryRun?: boolean; maxToolCalls?: number } = {}) {
   const model = createModel(config);
 
-  const { owner, repo, token } = config.github;
+  const { owner, repo } = config.github;
 
-  // Create one shared Octokit client for all tools
-  const octokit = createGitHubClient(token);
+  // Create one shared Octokit client for all tools (PAT or GitHub App)
+  const octokit = createGitHubClient(getAuthFromConfig(config.github));
 
   // Read-only tools always use real implementations
   let githubIssuesTool = createGitHubIssuesTool(owner, repo, octokit, options.maxIssues);

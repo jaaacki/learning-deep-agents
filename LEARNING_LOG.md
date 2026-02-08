@@ -5337,3 +5337,39 @@ The webhook endpoint responds 200 immediately, then dispatches to handlers. This
 ### Test coverage
 
 17 new tests covering: `isBotPr` helper (5), `handlePullRequestEvent` (9 cases including bot/non-bot/missing-data/wrong-action), `handleWebhookEvent` dispatcher (3). Total: 215 tests across 8 files.
+
+---
+
+## Entry 43: PAT vs GitHub App Authentication -- Migration Strategy (Issue #19)
+
+**Date:** 2026-02-09
+**Author:** Builder Agent
+**Issue:** #19 -- Migrate from PAT to GitHub App authentication
+
+### Why GitHub Apps over PATs
+
+Personal Access Tokens (PATs) are the simplest way to authenticate with GitHub's API -- one token, one line of config. But they have significant drawbacks for bot-like applications:
+
+1. **Tied to a user account.** If the user leaves the org or revokes the token, the bot breaks.
+2. **Broad permissions.** Fine-grained PATs help, but classic PATs grant access to all repos the user can see.
+3. **No installation context.** GitHub Apps get per-installation tokens scoped to specific repos, which is the Right Way for an app that operates on a single repo.
+4. **Rate limits.** GitHub Apps get higher rate limits (5,000 requests/hour per installation vs 5,000 per user for PATs).
+
+### Design decisions
+
+**Backwards-compatible migration.** PAT remains the default. Existing users don't need to change anything. GitHub App auth is opt-in: provide `appId`, `privateKeyPath`, and `installationId` in the config, and omit `token`.
+
+**Config validation is strict for partial App config.** If you provide `appId` but not `installationId`, that's a config error -- not a silent fallback to PAT. This prevents confusing "why isn't App auth working?" debugging sessions.
+
+**Private key file path, not inline PEM.** The config takes a file path to the `.pem` file rather than the key content inline. This avoids JSON escaping issues with multi-line PEM content and keeps the key in a separate file that's easy to secure (file permissions, `.gitignore`).
+
+**`getAuthFromConfig()` helper.** Rather than making every caller understand both auth modes, this function takes the github config section and returns either a PAT string or `GitHubAppAuth` object. The `createGitHubClient()` function handles both.
+
+**`@octokit/auth-app` does the heavy lifting.** This official Octokit package handles JWT signing, installation token generation, and token refresh. We pass `authStrategy: createAppAuth` to Octokit's constructor and it handles the rest transparently.
+
+### What changed in the codebase
+
+- `config.ts`: Validation now accepts either `token` OR all three app fields. Private key file existence is checked at load time.
+- `github-tools.ts`: `createGitHubClient()` accepts `string | GitHubAppAuth`. New `getAuthFromConfig()` helper.
+- `agent.ts`, `triage-agent.ts`, `core.ts`: All updated to use `getAuthFromConfig()` instead of raw `token`.
+- 8 new tests covering all validation paths and both auth modes.

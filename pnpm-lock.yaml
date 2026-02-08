@@ -17,6 +17,9 @@ importers:
       '@langchain/openai':
         specifier: ^1.2.0
         version: 1.2.5(@langchain/core@1.1.19(openai@6.18.0(zod@3.25.76)))
+      '@octokit/auth-app':
+        specifier: ^8.2.0
+        version: 8.2.0
       deepagents:
         specifier: ^1.7.0
         version: 1.7.2(openai@6.18.0(zod@3.25.76))

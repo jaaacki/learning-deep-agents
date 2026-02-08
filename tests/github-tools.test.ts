@@ -12,6 +12,8 @@ import {
   ToolCallCounter,
   CircuitBreakerError,
   wrapWithCircuitBreaker,
+  createGitHubClient,
+  getAuthFromConfig,
 } from '../src/github-tools.js';
 
 /**
@@ -487,5 +489,67 @@ describe('wrapWithCircuitBreaker', () => {
     await commentTool.invoke({ issue_number: 1, body: 'hello' });
     // Third call should trip the breaker
     await expect(branchTool.invoke({ branch_name: 'b2' })).rejects.toThrow(CircuitBreakerError);
+  });
+});
+
+// ── Auth helpers ────────────────────────────────────────────────────────────
+
+describe('getAuthFromConfig', () => {
+  it('returns PAT string when token is present', () => {
+    const result = getAuthFromConfig({ token: 'ghp_test123' });
+    expect(result).toBe('ghp_test123');
+  });
+
+  it('returns GitHubAppAuth when app fields are present', () => {
+    const result = getAuthFromConfig({
+      appId: 12345,
+      privateKeyPath: '/tmp/key.pem',
+      installationId: 67890,
+    });
+    expect(result).toEqual({
+      appId: 12345,
+      privateKeyPath: '/tmp/key.pem',
+      installationId: 67890,
+    });
+  });
+
+  it('prefers app fields over token when both present', () => {
+    const result = getAuthFromConfig({
+      token: 'ghp_test123',
+      appId: 12345,
+      privateKeyPath: '/tmp/key.pem',
+      installationId: 67890,
+    });
+    // App auth takes precedence when all fields are present
+    expect(typeof result).toBe('object');
+    expect((result as any).appId).toBe(12345);
+  });
+});
+
+describe('createGitHubClient', () => {
+  it('creates Octokit with PAT auth', () => {
+    const client = createGitHubClient('ghp_test123');
+    expect(client).toBeDefined();
+    expect(client.rest).toBeDefined();
+  });
+
+  it('creates Octokit with App auth when given GitHubAppAuth', () => {
+    // We need a real .pem file for this test -- mock fs.readFileSync
+    const fs = require('fs');
+    const originalReadFileSync = fs.readFileSync;
+    const fakePem = '-----BEGIN RSA PRIVATE KEY-----\nfake-key-content\n-----END RSA PRIVATE KEY-----';
+    vi.spyOn(fs, 'readFileSync').mockReturnValue(fakePem);
+
+    const client = createGitHubClient({
+      appId: 12345,
+      privateKeyPath: '/tmp/fake-key.pem',
+      installationId: 67890,
+    });
+
+    expect(client).toBeDefined();
+    expect(client.rest).toBeDefined();
+    expect(fs.readFileSync).toHaveBeenCalledWith('/tmp/fake-key.pem', 'utf-8');
+
+    vi.mocked(fs.readFileSync).mockRestore();
   });
 });
