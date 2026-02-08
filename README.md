@@ -5,17 +5,27 @@ A learning project for understanding Deep Agents / LangGraph patterns. An AI age
 ## What It Does
 
 ```
-cron  -->  poll.sh  -->  pnpm start  -->  Agent runs
-                                           |
-                                           +--> 1. Fetch open issues (since last poll)
-                                           +--> 2. List repo files to understand codebase structure
-                                           +--> 3. Read relevant source files for code-aware analysis
-                                           +--> 4. Comment summary on the issue
-                                           +--> 5. Write detailed analysis to ./issues/issue_<N>.md
-                                           +--> 6. Create branch + open draft PR
+cron  -->  poll.sh  -->  pnpm start  -->  Triage (cheap/fast)
+                                              |
+                                              +--> Skip irrelevant issues
+                                              |
+                                              +--> Analysis Agent (thorough)
+                                                    |
+                                                    +--> 1. Fetch open issues (since last poll)
+                                                    +--> 2. List repo files + read relevant source
+                                                    +--> 3. Comment summary on the issue
+                                                    +--> 4. Write analysis to ./issues/issue_<N>.md
+                                                    +--> 5. Create branch + commit proposed fix
+                                                    +--> 6. Self-review committed changes
+                                                    +--> 7. Open draft PR
 ```
 
 The agent never merges PRs. It only proposes fixes as drafts.
+
+Alternatively, use the webhook listener for real-time processing:
+```
+GitHub  --webhook-->  deepagents webhook  -->  Triage + Analysis
+```
 
 ## CLI Usage
 
@@ -36,6 +46,12 @@ pnpm run cli poll --max-issues 3
 
 # Analyze a single issue by number
 pnpm run cli analyze --issue 42
+
+# Triage a single issue (cheap/fast classification)
+pnpm run cli triage --issue 42
+
+# Start webhook listener (real-time, replaces cron)
+pnpm run cli webhook
 
 # Show current polling state
 pnpm run cli status
@@ -214,25 +230,33 @@ pnpm test
 pnpm run test:watch
 ```
 
-Tests use [vitest](https://vitest.dev/) with mocked external dependencies (Octokit, LLM constructors, filesystem). No real API calls are made during testing.
+177 tests across 8 test files using [vitest](https://vitest.dev/) with mocked external dependencies (Octokit, LLM constructors, filesystem). No real API calls are made during testing.
 
 ## File Structure
 
 ```
 deepagents/
   src/
-    cli.ts            -- CLI entry point (subcommands: poll, analyze, status)
-    core.ts           -- Shared logic (poll cycle, analyze, status, state management)
+    cli.ts            -- CLI entry point (subcommands: poll, analyze, triage, webhook, status)
+    core.ts           -- Shared logic (poll cycle, state management, graceful shutdown)
     index.ts          -- Original entry point (thin wrapper, backwards-compatible)
-    config.ts         -- Loads and validates config.json
+    config.ts         -- Loads and validates config.json (GitHub + LLM + webhook)
     model.ts          -- LLM provider factory (Anthropic, OpenAI, Ollama, etc.)
-    github-tools.ts   -- GitHub API tools (fetch, list files, comment, branch, PR)
-    agent.ts          -- Creates the agent with tools + system prompt
+    github-tools.ts   -- GitHub API tools (fetch, list files, comment, branch, PR, commit)
+    agent.ts          -- Creates the analysis agent with tools + system prompt
+    triage-agent.ts   -- Triage agent (cheap model, read-only tools, issue classification)
+    logger.ts         -- Structured logging wrapper for tool calls
+    utils.ts          -- Retry with exponential backoff for API calls
+    listener.ts       -- Express webhook server with HMAC-SHA256 verification
   tests/
-    core.test.ts      -- Unit tests for core logic (pure functions, state)
+    core.test.ts      -- Unit tests for core logic, state, graceful shutdown
     github-tools.test.ts -- Idempotency and tool tests (mocked Octokit)
     model.test.ts     -- Provider routing tests (mocked LLM constructors)
     config.test.ts    -- Config validation tests (mocked fs, process.exit)
+    triage-agent.test.ts -- Triage agent parsing and config tests
+    logger.test.ts    -- Structured logging wrapper tests
+    utils.test.ts     -- Retry logic and error classification tests
+    listener.test.ts  -- Webhook endpoint and signature verification tests
   issues/             -- Generated: detailed analysis files
   config.json         -- Your credentials (git-ignored)
   config.json.example -- Template for config.json
