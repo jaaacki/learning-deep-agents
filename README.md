@@ -49,9 +49,23 @@ Edit `config.json`:
   "llm": {
     "provider": "anthropic",
     "apiKey": "sk-ant-your_key_here",
-    "model": "claude-sonnet-4-20250514"
+    "model": "claude-sonnet-4-20250514",
+    "baseUrl": null
   }
 }
+```
+
+#### Other LLM providers
+
+```json
+// OpenAI
+{ "provider": "openai", "apiKey": "sk-...", "model": "gpt-4", "baseUrl": null }
+
+// Ollama (local)
+{ "provider": "ollama", "apiKey": null, "model": "llama3", "baseUrl": null }
+
+// OpenAI-compatible (LM Studio, Together, Groq, etc.)
+{ "provider": "openai-compatible", "apiKey": "key-or-null", "model": "my-model", "baseUrl": "http://localhost:1234/v1" }
 ```
 
 **Tip:** Point it at a repo you own that has a few open issues. If you don't have one, create a test repo with 2-3 dummy issues.
@@ -157,6 +171,7 @@ deepagents/
   src/
     index.ts          -- Entry point, polling state management
     config.ts         -- Loads and validates config.json
+    model.ts          -- LLM provider factory (Anthropic, OpenAI, Ollama, etc.)
     github-tools.ts   -- GitHub API tools (fetch, comment, branch, PR)
     agent.ts          -- Creates the agent with tools + system prompt
   issues/             -- Generated: detailed analysis files
