@@ -69,17 +69,46 @@ export function createGitHubIssuesTool(owner: string, repo: string, octokit: Oct
  * Tool: Post a comment on a GitHub issue
  * Uses octokit.rest.issues.createComment() -- works for both issues and PRs.
  */
+/**
+ * Hidden HTML marker embedded in bot comments for idempotency detection.
+ * GitHub renders HTML comments invisibly, so users never see this.
+ */
+const BOT_COMMENT_MARKER = '<!-- deep-agent-analysis -->';
+
 export function createCommentOnIssueTool(owner: string, repo: string, octokit: Octokit) {
   return tool(
     async ({ issue_number, body }: { issue_number: number; body: string }) => {
       try {
         console.log(`\u{1F4AC} Commenting on issue #${issue_number} in ${owner}/${repo}...`);
 
+        // Idempotency check: see if we already posted an analysis comment
+        const { data: existingComments } = await octokit.rest.issues.listComments({
+          owner,
+          repo,
+          issue_number,
+          per_page: 100,
+        });
+        const alreadyCommented = existingComments.some(
+          (c) => c.body?.includes(BOT_COMMENT_MARKER)
+        );
+
+        if (alreadyCommented) {
+          console.log(`\u{26A0}\uFE0F  Skipping comment on issue #${issue_number} -- analysis comment already exists.`);
+          return JSON.stringify({
+            skipped: true,
+            reason: 'Analysis comment already exists on this issue.',
+            issue_number,
+          });
+        }
+
+        // Include the marker in the comment body (invisible in rendered Markdown)
+        const markedBody = `${BOT_COMMENT_MARKER}\n${body}`;
+
         const { data: comment } = await octokit.rest.issues.createComment({
           owner,
           repo,
           issue_number,
-          body,
+          body: markedBody,
         });
 
         return JSON.stringify({
@@ -93,7 +122,7 @@ export function createCommentOnIssueTool(owner: string, repo: string, octokit: O
     },
     {
       name: 'comment_on_issue',
-      description: 'Post a comment on a GitHub issue. Use this to share analysis findings directly on the issue.',
+      description: 'Post a comment on a GitHub issue. Use this to share analysis findings directly on the issue. Automatically skips if an analysis comment already exists (idempotent).',
       schema: z.object({
         issue_number: z.number().describe('The issue number to comment on'),
         body: z.string().describe('The comment body (Markdown supported)'),
@@ -113,6 +142,27 @@ export function createBranchTool(owner: string, repo: string, octokit: Octokit) 
     async ({ branch_name, from_branch = 'main' }: { branch_name: string; from_branch?: string }) => {
       try {
         console.log(`\u{1F33F} Creating branch '${branch_name}' from '${from_branch}' in ${owner}/${repo}...`);
+
+        // Idempotency check: see if the branch already exists
+        try {
+          await octokit.rest.git.getRef({
+            owner,
+            repo,
+            ref: `heads/${branch_name}`,
+          });
+          // If we get here, the branch exists
+          console.log(`\u{26A0}\uFE0F  Skipping branch creation -- '${branch_name}' already exists.`);
+          return JSON.stringify({
+            skipped: true,
+            reason: `Branch '${branch_name}' already exists.`,
+            branch: branch_name,
+            url: `https://github.com/${owner}/${repo}/tree/${branch_name}`,
+          });
+        } catch (e: unknown) {
+          // 404 means the branch does not exist -- this is the expected path
+          const status = (e as { status?: number }).status;
+          if (status !== 404) throw e;
+        }
 
         // Step 1: Get the SHA of the source branch
         const { data: ref } = await octokit.rest.git.getRef({
@@ -141,7 +191,7 @@ export function createBranchTool(owner: string, repo: string, octokit: Octokit) 
     },
     {
       name: 'create_branch',
-      description: 'Create a new Git branch in the repository. Used to prepare a feature branch before opening a pull request.',
+      description: 'Create a new Git branch in the repository. Used to prepare a feature branch before opening a pull request. Automatically skips if the branch already exists (idempotent).',
       schema: z.object({
         branch_name: z.string().describe('Name for the new branch (e.g., "issue-42-fix-login")'),
         from_branch: z.string().optional().default('main').describe('Branch to create from (default: main)'),
@@ -160,6 +210,26 @@ export function createPullRequestTool(owner: string, repo: string, octokit: Octo
     async ({ title, body, head, base = 'main' }: { title: string; body: string; head: string; base?: string }) => {
       try {
         console.log(`\u{1F4DD} Creating draft PR '${title}' in ${owner}/${repo}...`);
+
+        // Idempotency check: see if an open PR already exists for this head branch
+        const { data: existingPRs } = await octokit.rest.pulls.list({
+          owner,
+          repo,
+          head: `${owner}:${head}`,
+          base,
+          state: 'open',
+        });
+
+        if (existingPRs.length > 0) {
+          const existing = existingPRs[0];
+          console.log(`\u{26A0}\uFE0F  Skipping PR creation -- open PR #${existing.number} already exists for branch '${head}'.`);
+          return JSON.stringify({
+            skipped: true,
+            reason: `Open PR #${existing.number} already exists for branch '${head}'.`,
+            number: existing.number,
+            html_url: existing.html_url,
+          });
+        }
 
         const { data: pr } = await octokit.rest.pulls.create({
           owner,
@@ -183,7 +253,7 @@ export function createPullRequestTool(owner: string, repo: string, octokit: Octo
     },
     {
       name: 'create_pull_request',
-      description: 'Open a draft pull request. The PR should reference the issue number in the title and body. Always creates a draft PR -- never auto-merges.',
+      description: 'Open a draft pull request. The PR should reference the issue number in the title and body. Always creates a draft PR -- never auto-merges. Automatically skips if an open PR already exists for the same branch (idempotent).',
       schema: z.object({
         title: z.string().describe('PR title (e.g., "Fix #42: Resolve login timeout")'),
         body: z.string().describe('PR description with analysis and approach. Include "Closes #N" to link the issue.'),

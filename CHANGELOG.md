@@ -9,6 +9,38 @@
 
 ---
 
+## v0.2.4 — 2026-02-08
+
+### Changed
+- **Prevent duplicate PRs** (Issue #10) — `create_pull_request` is now idempotent
+- Checks for existing open PR on the same head branch before creating
+- Returns `{ skipped: true }` with existing PR URL if one already exists
+
+## v0.2.3 — 2026-02-08
+
+### Changed
+- **Prevent duplicate branches** (Issue #9) — `create_branch` is now idempotent
+- Checks if branch already exists before creating (uses `getRef` with 404 detection)
+- Returns `{ skipped: true }` with branch URL if branch already exists
+
+## v0.2.2 — 2026-02-08
+
+### Changed
+- **Prevent duplicate comments** (Issue #8) — `comment_on_issue` is now idempotent
+- Checks for existing bot comment (hidden HTML marker) before posting
+- Returns `{ skipped: true }` if analysis comment already exists
+- Uses `<!-- deep-agent-analysis -->` marker pattern (standard in GitHub bots)
+
+## v0.2.1 — 2026-02-08
+
+### Added
+- **Max issues per run** (Issue #5) — caps how many issues the agent processes per invocation
+- `maxIssuesPerRun` config option in `config.json` (default: 5)
+- Limit displayed at startup for operator visibility
+
+### Changed
+- User message to the agent now includes the issue limit explicitly
+
 ## v0.2.0 — 2026-02-08 — Phase 1 Complete: Code Awareness
 
 **Milestone:** The agent can now read actual source code, not just issue descriptions. Analysis quality jumps from guessing to code-aware.

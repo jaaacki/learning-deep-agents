@@ -24,6 +24,13 @@ function savePollState(state: PollState): void {
 }
 
 /**
+ * Maximum number of issues to process per run.
+ * Prevents runaway API usage and LLM token costs.
+ * Can be overridden via config.json: { "maxIssuesPerRun": 10 }
+ */
+const DEFAULT_MAX_ISSUES_PER_RUN = 5;
+
+/**
  * Main entry point - Poll GitHub issues and analyze them
  */
 async function main() {
@@ -34,7 +41,9 @@ async function main() {
 
   // Load config
   const config = loadConfig();
-  console.log(`\u{2705} Config loaded: ${config.github.owner}/${config.github.repo}\n`);
+  const maxIssues: number = config.maxIssuesPerRun ?? DEFAULT_MAX_ISSUES_PER_RUN;
+  console.log(`\u{2705} Config loaded: ${config.github.owner}/${config.github.repo}`);
+  console.log(`\u{1F6E1}\uFE0F  Max issues per run: ${maxIssues}\n`);
 
   // Load polling state
   const pollState = loadPollState();
@@ -54,10 +63,10 @@ async function main() {
 
   // Build user message with polling context
   const pollingContext = sinceDate
-    ? `Fetch open issues updated since ${sinceDate} and analyze any new ones. ` +
+    ? `Fetch open issues updated since ${sinceDate} (limit: ${maxIssues}) and analyze any new ones. ` +
       `Previously processed issues: ${pollState!.lastPollIssueNumbers.join(', ')}. ` +
       `Skip those unless they have been updated.`
-    : `Fetch all open issues and analyze them. This is the first poll run.`;
+    : `Fetch open issues (limit: ${maxIssues}) and analyze them. This is the first poll run.`;
 
   const userMessage = pollingContext + `
 

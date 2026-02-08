@@ -9,5 +9,6 @@
     "apiKey": "sk-ant-xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx",
     "model": "claude-sonnet-4-20250514",
     "baseUrl": null
-  }
+  },
+  "maxIssuesPerRun": 5
 }

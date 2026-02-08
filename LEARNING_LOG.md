@@ -2054,3 +2054,493 @@ Phase 2 (Safety & Idempotency) begins after this review. Key items that Phase 2 
 Response size limits from Findings #1 and #2 could be addressed as quick patches before Phase 2 or folded into Phase 2's "bounded resource usage" theme.
 
 ---
+
+## Entry 12: Implementing Max Issues Per Run (Issue #5)
+
+**Date:** 2026-02-08
+**Author:** Builder Agent
+**Builds on:** Entries 8, 11
+**Issue:** #5 -- Max issues per run
+**Version:** v0.2.1
+
+### What just happened?
+
+We added a configurable cap on how many issues the agent processes per invocation. This is the first Phase 2 feature -- a **guardrail** that bounds the agent's resource consumption.
+
+### The pattern: Orchestration-level constraints
+
+This is not a tool change -- it is an orchestration change in `src/index.ts`. The `fetch_github_issues` tool already has a `limit` parameter, but it was controlled by the LLM. Now the orchestrator passes the limit explicitly in the user message:
+
+```typescript
+const maxIssues: number = config.maxIssuesPerRun ?? DEFAULT_MAX_ISSUES_PER_RUN;
+
+const pollingContext = sinceDate
+  ? `Fetch open issues updated since ${sinceDate} (limit: ${maxIssues}) ...`
+  : `Fetch open issues (limit: ${maxIssues}) ...`;
+```
+
+**Why in the user message, not baked into the tool?** The `fetch_github_issues` tool's `limit` parameter has a general purpose -- it controls how many issues are returned from the API. The "max issues per run" is an orchestration concern: it controls how much *work* the agent does in one session. These are different concepts. The tool limit says "show me N issues." The run limit says "only process N issues total." They happen to align here because we want to fetch at most N issues, but in the future the agent might need to fetch 100 issues, filter to 5 relevant ones, and process only those.
+
+**Why also configurable?** The default of 5 is conservative. A user with a low-traffic repo might want 20. A user watching a busy repo might want 3 to keep costs down. The `maxIssuesPerRun` field in `config.json` lets them choose.
+
+### Why this matters for unattended operation
+
+Without this cap, the agent processes *all* open issues on every run. Consider a scenario:
+- The repo has 50 open issues
+- First poll run fetches all 50
+- Each issue triggers: fetch -> list files -> read files -> comment -> branch -> PR
+- That is 50 x (5+ API calls + LLM inference) = 250+ API calls + 50 LLM completions
+- At $0.03/1K tokens, analyzing 50 issues could cost $5-10 per run
+- With a 15-minute cron, that is $480-960/day
+
+The cap prevents this. With `maxIssuesPerRun: 5`, the worst case is 5 issues per run. Unprocessed issues are handled in the next cron cycle.
+
+### The "aha moment"
+
+**Guardrails are not about limiting the agent's intelligence -- they are about limiting its blast radius.** The agent is still free to analyze each issue as thoroughly as it wants. The guardrail only controls *how many* issues it works on. This is the difference between constraining *quality* (bad) and constraining *scope* (good). Phase 2 is all about scope constraints.
+
+### Connection to next entries
+
+The next entry implements idempotency checks for the agent's write operations: duplicate comment prevention (#8), duplicate branch prevention (#9), and duplicate PR prevention (#10). These are *tool-level* guardrails, complementing this *orchestration-level* guardrail.
+
+---
+
+## Entry 13: Making Write Tools Idempotent (Issues #8, #9, #10)
+
+**Date:** 2026-02-08
+**Author:** Builder Agent
+**Builds on:** Entries 5, 6, 7, 12
+**Issues:** #8 (duplicate comments), #9 (duplicate branches), #10 (duplicate PRs)
+**Versions:** v0.2.2, v0.2.3, v0.2.4
+
+### What just happened?
+
+We made all three write tools idempotent: `comment_on_issue`, `create_branch`, and `create_pull_request`. Each tool now checks for the existence of its output before creating it, and returns `{ skipped: true }` if the output already exists. This means the agent can safely be re-run against the same issues without creating duplicates.
+
+### What is idempotency and why it matters for agents?
+
+An operation is **idempotent** if performing it multiple times produces the same result as performing it once. `GET /issues` is naturally idempotent -- fetching issues twice gives you the same issues. `POST /comments` is not -- posting twice creates two comments.
+
+For an agent running on a cron schedule, idempotency is critical because:
+1. **Crash recovery:** If the agent crashes after commenting but before saving poll state, the next run re-processes the same issue. Without idempotency, the issue gets a duplicate comment.
+2. **Cron overlap:** If a run takes longer than the cron interval, two runs process the same issues simultaneously (Entry 7, Finding #6).
+3. **Manual re-runs:** A developer running `npm start` twice for debugging should not cause duplicate side effects.
+
+### Three different idempotency patterns
+
+Each tool uses a different technique suited to its API:
+
+#### Pattern 1: Hidden HTML marker (comments)
+
+```typescript
+const BOT_COMMENT_MARKER = '<!-- deep-agent-analysis -->';
+
+// Check existing comments for our marker
+const { data: existingComments } = await octokit.rest.issues.listComments({...});
+const alreadyCommented = existingComments.some(c => c.body?.includes(BOT_COMMENT_MARKER));
+
+if (alreadyCommented) return { skipped: true, reason: '...' };
+
+// Include marker in new comments
+const markedBody = `${BOT_COMMENT_MARKER}\n${body}`;
+```
+
+**Why HTML comments?** GitHub's Markdown renderer hides HTML comments (`<!-- -->`). Users never see the marker, but our code can find it. This is the standard pattern used by Dependabot, Renovate, and other GitHub bots.
+
+**Why not check by author?** The bot posts under the token owner's account (a human user), not a dedicated bot account. Filtering by author would skip the human's own comments. The hidden marker is more specific -- it only matches comments that our code created.
+
+#### Pattern 2: Existence check with 404 detection (branches)
+
+```typescript
+try {
+  await octokit.rest.git.getRef({ owner, repo, ref: `heads/${branch_name}` });
+  // Branch exists -- skip
+  return { skipped: true, reason: '...' };
+} catch (e) {
+  if ((e as { status?: number }).status !== 404) throw e;
+  // 404 = branch does not exist -- proceed to create
+}
+```
+
+**Why try/catch instead of a list query?** The GitHub Refs API has no "check if ref exists" endpoint. The only way to check is to try to fetch it. A 404 means it does not exist (proceed), any other error is a real failure (re-throw).
+
+**Why check for the specific 404 status?** Other errors (401 unauthorized, 403 rate limited, 500 server error) should not be silently swallowed. We only catch the "not found" case and let everything else propagate to the outer try/catch.
+
+#### Pattern 3: List query with filter (PRs)
+
+```typescript
+const { data: existingPRs } = await octokit.rest.pulls.list({
+  owner, repo,
+  head: `${owner}:${head}`,
+  base,
+  state: 'open',
+});
+
+if (existingPRs.length > 0) {
+  return { skipped: true, existing: existingPRs[0].html_url };
+}
+```
+
+**Why list instead of try/catch?** Unlike branches, PRs can be queried by head branch. The `pulls.list` API supports filtering by `head` (the source branch) and `state`. This is cleaner than catching errors from `pulls.create`.
+
+**Why filter by `state: 'open'`?** A closed or merged PR for the same branch should not prevent creating a new one. The issue might have been reopened with new information, warranting a fresh analysis and PR.
+
+**The `owner:branch` format:** The `head` filter requires the full `owner:branch` format (e.g., `jaaacki:issue-42-fix-login`). This is because PRs can come from forks, so the owner prefix disambiguates.
+
+### The `{ skipped: true }` return pattern
+
+All three tools return the same structure when skipping:
+
+```json
+{
+  "skipped": true,
+  "reason": "Human-readable explanation",
+  // Plus relevant context (branch URL, PR number, etc.)
+}
+```
+
+**Why a structured response instead of an error?** Skipping is not an error -- it is correct behavior. The agent should see "already done" and move on to the next step, not treat it as a failure to recover from. The `reason` field helps the LLM understand what happened and include it in its analysis report.
+
+### Cost of idempotency: extra API calls
+
+Each idempotency check adds one API call per tool invocation:
+- `comment_on_issue`: +1 call (`listComments`) per issue
+- `create_branch`: +1 call (`getRef`) per issue
+- `create_pull_request`: +1 call (`pulls.list`) per issue
+
+For 5 issues per run, that is 15 extra API calls. Against GitHub's 5,000/hour rate limit, this is negligible. The cost is worth the safety -- preventing duplicate comments, branches, and PRs is more important than saving 15 API calls.
+
+### The "aha moment"
+
+**Idempotency is not a single pattern -- it is a principle that adapts to each API's capabilities.** Comments use markers (no native dedup mechanism). Branches use existence checks (the only query available). PRs use list-and-filter (the API supports it natively). The common thread is: *check before you write, and return gracefully if the work is already done.*
+
+This is the tool-level complement to Entry 12's orchestration-level guardrail (max issues per run). Together, they form a defense-in-depth: the orchestrator limits *how many* issues are processed, and the tools ensure *each issue* is processed safely.
+
+### Connection to next work
+
+With these four Phase 2 features (max issues, idempotent comments, idempotent branches, idempotent PRs), the agent is significantly safer for unattended operation. The remaining Phase 2 issues (#11 action tracking, #6 circuit breaker, #7 dry run) add further layers of protection.
+
+---
+
+## Entry 14: Critic's Phase 2 Review -- Safety, Idempotency, and What Can Still Go Wrong
+
+**Date:** 2026-02-08
+**Author:** Critic Agent
+**Reviews:** Entries 12-13 (Builder Phase 2 implementations: #5, #8, #9, #10)
+**Files reviewed:** `src/github-tools.ts` (idempotency checks), `src/index.ts` (maxIssuesPerRun), `src/agent.ts` (system prompt), `config.json.example`, `CHANGELOG.md`, `README.md`, `package.json`
+
+### Purpose of this entry
+
+Phase 2 is about making the bot safe to run unattended. This review pressure-tests the four implemented safety features by asking: "Can the bot still cause problems despite these checks?" Every finding is a scenario where the guardrails might not hold.
+
+---
+
+### Guiding principles check
+
+| Principle | Verdict | Notes |
+|---|---|---|
+| 1. Learning first | Pass | Entry 13's three-pattern comparison (marker, 404, list-filter) is excellent teaching. Entry 12's "scope vs. quality" distinction is clear. |
+| 2. Incremental | Pass | Four features, each with its own patch bump (v0.2.1-v0.2.4). Existing behavior preserved for new issues. |
+| 3. Simple file structure | Pass | All changes in existing files. No new source files created. |
+| 4. CLI as the wrapper | N/A | Phase 3 concern. |
+| 5. Humans decide | Pass | Idempotency checks prevent automated spam. The agent still proposes, never merges. |
+| 6. GitHub as the event bus | Pass | All checks use GitHub's native APIs. No custom state beyond `last_poll.json`. |
+
+**Overall:** Well-aligned with guiding principles. The idempotency pattern is the right approach for a bot that writes to GitHub.
+
+---
+
+### Bonus: Entry 11 Finding #2 addressed
+
+The Builder added 500-line truncation to `read_repo_file` (`github-tools.ts:378-398`). This addresses my Entry 11 Finding #2 (no content size guard). The implementation is clean -- truncated files include `total_lines`, `shown_lines`, and a `note` guiding the agent to find smaller files. The v0.2.0 CHANGELOG was updated to reflect this. Good responsiveness to review feedback.
+
+---
+
+### Finding 1: `maxIssuesPerRun` does not actually bound the agent -- it is a suggestion
+
+**File:** `src/index.ts:44,66-69`
+
+**What happens:** The limit is embedded in the user message as text: `"Fetch open issues (limit: 5)"`. The agent is expected to pass `limit: 5` to `fetch_github_issues`. But the agent controls the `limit` parameter -- nothing prevents it from calling `fetch_github_issues({ limit: 100 })` or calling the tool multiple times.
+
+**What could go wrong:**
+- The LLM ignores the limit in the user message and fetches all issues
+- The LLM calls `fetch_github_issues` twice (once for open, once for closed)
+- The LLM processes more issues than the limit because the limit only applies to *fetching*, not to *processing*
+
+**The learning moment:** This is the same class of problem as Entry 7 Finding #10 (the `since` parameter depends on LLM compliance). Entry 12 acknowledges the distinction between "fetch limit" and "run limit" but does not enforce the run limit in code.
+
+**What would actually bound the agent:** Bake the limit into the tool at construction time, the same way `owner` and `repo` are baked in:
+
+```typescript
+export function createGitHubIssuesTool(owner, repo, octokit, maxIssues?: number) {
+  return tool(async ({ state, limit }) => {
+    const effectiveLimit = maxIssues ? Math.min(limit ?? 5, maxIssues) : (limit ?? 5);
+    // ...
+  });
+}
+```
+
+This enforces the cap regardless of what the LLM requests.
+
+**Impact:** Medium -- the guardrail can be bypassed by the very entity it is meant to constrain.
+**Effort:** Small -- one parameter, one `Math.min`.
+
+---
+
+### Finding 2: Comment idempotency check has a pagination gap
+
+**File:** `src/github-tools.ts:85-89`
+
+**What happens:** The tool fetches comments with `per_page: 100`. If an issue has more than 100 comments, the marker check only scans the first 100. A bot comment on page 2+ would be missed, and a duplicate would be posted.
+
+**How realistic is this?** Most issues have fewer than 100 comments. But long-running issues in active repos (e.g., tracking issues, meta-discussions) can accumulate hundreds of comments. If the bot is pointed at such a repo, this gap becomes real.
+
+**The fix options:**
+1. **Paginate all comments** -- use `octokit.paginate()` to fetch all pages. Simple but adds latency for high-comment issues.
+2. **Search from newest** -- the API supports `direction: 'desc'` and `sort: 'created'`. If the bot comment was recent, it will be in the first page. But this misses old bot comments from a previous deployment.
+3. **Acceptable risk** -- document the 100-comment limit and move on. For a learning project, this is reasonable.
+
+**The learning moment:** Pagination is the silent assumption behind most "check before write" patterns. When you call `listComments({ per_page: 100 })`, you are implicitly saying "I only care about the first 100." Always ask: "What if there are more?"
+
+**Impact:** Low -- rare edge case (100+ comments).
+**Effort:** Small -- change to `octokit.paginate()` or add `direction: 'desc'`.
+
+---
+
+### Finding 3: Deleting `last_poll.json` defeats maxIssuesPerRun but NOT idempotency
+
+**Question from team lead:** "Can the bot still spam if last_poll.json is deleted?"
+
+**Answer:** No -- and this is the key value of tool-level idempotency over orchestration-level state.
+
+If `last_poll.json` is deleted:
+- The orchestrator treats it as a first run and tells the agent to fetch all issues
+- The agent processes up to `maxIssuesPerRun` issues (if the LLM obeys the limit)
+- For each issue, `comment_on_issue` checks for the HTML marker -- if a comment already exists, it skips
+- `create_branch` checks if the branch exists -- if so, it skips
+- `create_pull_request` checks for an existing open PR -- if so, it skips
+
+**Result:** The agent re-analyzes issues but does not create duplicate side effects. This is exactly the defense-in-depth pattern that Entry 13 describes. The orchestration-level state (`last_poll.json`) is the first line of defense, and the tool-level idempotency checks are the second.
+
+**One exception:** `write_file` (the built-in deepagents tool) is NOT idempotent. If `last_poll.json` is deleted, the agent will overwrite `./issues/issue_N.md` files. This is harmless for this project (the new analysis replaces the old one), but worth noting that the local filesystem writes are not covered by the idempotency pattern.
+
+**Impact:** None -- the design handles this correctly.
+
+---
+
+### Finding 4: Cron overlap is still not prevented
+
+**Question from team lead:** "Can cron overlap cause duplicates despite the checks?"
+
+**Answer:** The idempotency checks reduce the damage significantly but do not eliminate the race condition.
+
+**The race window:** Two cron instances start simultaneously. Both call `comment_on_issue` for issue #42 at the same time.
+
+```
+Instance A: listComments() -> no marker found -> createComment()
+Instance B: listComments() -> no marker found -> createComment()  // B reads before A writes
+```
+
+Both instances see "no marker found" because the check and the write are not atomic. Both post comments. This is a classic **TOCTOU** (Time-Of-Check-Time-Of-Use) race condition.
+
+The same race exists for branches (two `getRef` calls return 404 simultaneously, both call `createRef`) and PRs (two `pulls.list` calls return empty, both call `pulls.create`).
+
+**How likely is this?** The race window is small (milliseconds between check and write), and the LLM inference adds seconds of delay that naturally separates the two instances' API calls. In practice, this race is unlikely but not impossible.
+
+**What prevents it:** The lock file mechanism from Entry 7 Finding #6. This was flagged 6 entries ago and is still not implemented. Adding `mkdir "$LOCKFILE"` to `poll.sh` would eliminate cron overlap entirely, making the TOCTOU race impossible.
+
+**The learning moment:** Idempotency checks protect against *sequential* re-runs (crash recovery, manual re-runs, state file deletion). They do NOT protect against *concurrent* runs. For concurrent safety, you need a mutex (lock file, database lock, or atomic API operations).
+
+**Impact:** Medium -- idempotency reduces damage but does not eliminate cron overlap risk.
+**Effort:** Small -- 5 lines in `poll.sh` (Entry 7 Finding #6).
+
+---
+
+### Finding 5: Edited or deleted marker comments break idempotency
+
+**Question from team lead:** "Is the marker string detection reliable?"
+
+**Scenario 1: Comment edited.** A human edits the bot's comment and accidentally removes the `<!-- deep-agent-analysis -->` marker. The next run does not find the marker and posts a duplicate comment.
+
+**Scenario 2: Comment deleted.** A human deletes the bot's comment entirely. The next run does not find any marker and posts a new comment. This is arguably correct behavior -- if the comment was deliberately deleted, re-posting might be desired. But it depends on the user's intent.
+
+**How realistic is this?**
+- Editing: unlikely. HTML comments are invisible in GitHub's rendered view, so users would not see or interact with them. But raw-editing the comment in GitHub's Markdown editor would expose and potentially break the marker.
+- Deleting: more likely. A user might delete a stale or incorrect analysis comment and expect the bot to re-analyze on the next run.
+
+**The learning moment:** Marker-based idempotency is robust against automated re-runs but fragile against human intervention. This is acceptable for a bot comment (the human can always re-trigger by deleting), but would be problematic for more critical resources (you would not want a financial transaction to re-execute because someone deleted a marker).
+
+**Impact:** Low -- human editing the marker is rare; deletion is arguably correct behavior.
+**Effort:** N/A -- acceptable trade-off.
+
+---
+
+### Finding 6: The `{ skipped: true }` response adds noise to the LLM context
+
+**File:** All three idempotency checks in `github-tools.ts`
+
+**What happens:** When a tool skips, it returns a JSON response like `{ skipped: true, reason: "..." }`. The LLM reads this as a tool result and must process it. On a re-run where all issues are already processed, the agent receives N skip responses per issue (comment, branch, PR) -- that is 3 x N tool results containing "already exists" messages.
+
+**What could go wrong:** The LLM might:
+- Misinterpret "skipped" as an error and retry
+- Include verbose "I skipped this because..." explanations in its output, wasting tokens
+- Get confused about whether it actually completed its task
+
+**Why this is acceptable:** The tool descriptions were updated to say "Automatically skips if ... already exists (idempotent)." This tells the LLM upfront that skipping is expected behavior. The `reason` field gives the LLM enough context to understand and move on. In practice, well-prompted LLMs handle skip responses gracefully.
+
+**A minor improvement:** The system prompt could explicitly say: "If a tool returns `skipped: true`, this is normal -- the work was already done. Move to the next step." This would reduce the chance of the LLM treating skips as problems.
+
+**Impact:** Low.
+**Effort:** Trivial -- one line in the system prompt.
+
+---
+
+### Finding 7: `maxIssuesPerRun` is not validated
+
+**File:** `src/index.ts:44` -- `const maxIssues: number = config.maxIssuesPerRun ?? DEFAULT_MAX_ISSUES_PER_RUN;`
+
+**What happens:** If `config.json` contains `"maxIssuesPerRun": -1` or `"maxIssuesPerRun": "banana"`, the code uses the value as-is. A negative limit would pass `limit: -1` to `fetch_github_issues`, which would be sent to GitHub's API as `per_page: -1`. GitHub would likely ignore it or return its default (30 issues), bypassing the intended cap.
+
+**The fix:** Validate in `index.ts`:
+
+```typescript
+const rawMax = config.maxIssuesPerRun;
+const maxIssues = (typeof rawMax === 'number' && rawMax > 0) ? rawMax : DEFAULT_MAX_ISSUES_PER_RUN;
+```
+
+This connects to Entry 7 Finding #2 (Config is untyped `any`). The root cause is the same: `JSON.parse` returns `any`, so runtime validation is needed at every access point. Zod config validation would solve this class of problem once.
+
+**Impact:** Low -- users who intentionally write bad config values are not the target audience.
+**Effort:** Trivial -- one line.
+
+---
+
+### Finding 8: Duplicate PR check only looks at `state: 'open'` -- closed+reopened issue edge case
+
+**File:** `src/github-tools.ts:215-221`
+
+**What happens:** The PR idempotency check filters by `state: 'open'`. If a PR was previously created, then closed (not merged), and the issue is still open, the next run will:
+1. Create a new branch (which may already exist -- branch check catches this)
+2. Create a new PR (the old one is closed, so the check passes)
+
+**Is this correct?** Entry 13 says: "A closed or merged PR for the same branch should not prevent creating a new one." This is a reasonable design decision -- if the old PR was deliberately closed, creating a new one is appropriate.
+
+**The edge case:** If the branch still exists (from the old PR) and has no new commits, the new PR is identical to the closed one. This is not harmful but may confuse human reviewers who see a "new" PR with the same content as the closed one.
+
+**Impact:** Very Low -- correct behavior by design; edge case is cosmetic.
+
+---
+
+### Finding 9: System prompt does not mention idempotency to the agent
+
+**File:** `src/agent.ts:33-83`
+
+**What is missing:** The system prompt was not updated to tell the agent about the idempotency behavior. The tool descriptions mention it ("Automatically skips if..."), but the system prompt's step-by-step workflow still says "Use comment_on_issue to post a summary" without noting that it might skip.
+
+**Why this matters:** If a tool returns `{ skipped: true }`, the agent might think step 2 failed and abort the remaining steps for that issue. Or it might retry the comment with different wording, hoping the "skip" was a transient issue.
+
+**Concrete improvement:** Add to the IMPORTANT section of the system prompt:
+
+```
+- All write tools (comment, branch, PR) are idempotent. If they return { skipped: true },
+  the work was already done -- move to the next step without retrying.
+```
+
+**Impact:** Medium -- affects agent behavior on re-runs.
+**Effort:** Trivial -- two lines in the system prompt.
+
+---
+
+### Teaching notes accuracy check (Entries 12-13)
+
+| Claim | Accurate? | Notes |
+|---|---|---|
+| Entry 12: "The tool limit says 'show me N issues.' The run limit says 'only process N issues total.'" | Conceptually correct | But the implementation does not enforce the run limit in code (Finding 1). |
+| Entry 12: Cost estimate "50 issues could cost $5-10 per run" | Plausible | Depends on model, issue complexity, and file sizes. Reasonable order of magnitude. |
+| Entry 13: "GitHub's Markdown renderer hides HTML comments" | Correct | Standard HTML comment behavior. |
+| Entry 13: "The bot posts under the token owner's account" | Correct | PAT-based auth uses the human's identity. GitHub App would have a separate bot identity (Phase 7). |
+| Entry 13: "`head` filter requires `owner:branch` format" | Correct | GitHub API documentation confirms this. |
+| Entry 13: "15 extra API calls for 5 issues" (idempotency cost) | Correct | 3 checks x 5 issues = 15. |
+| Entry 13: Three idempotency patterns comparison | Correct and well-structured | The marker/404/list-filter distinction is a useful mental model. |
+
+**Overall:** Teaching notes are accurate and well-structured. Entry 13's three-pattern comparison is one of the best teaching sections in the entire LEARNING_LOG.
+
+---
+
+### Version bump assessment: Should 0.2.4 become 0.3.0?
+
+**The versioning plan:** v0.3.0 = Phase 2 complete (Safety & Idempotency).
+
+**Phase 2 status:** ROADMAP lists 7 issues for Phase 2: #5, #6, #7, #8, #9, #10, #11. Of these, 4 are implemented (#5, #8, #9, #10). Three remain: #6 (circuit breaker), #7 (dry run), #11 (action tracking per issue).
+
+**Recommendation:** Do NOT bump to v0.3.0. Phase 2 is not complete. The remaining three issues (#6, #7, #11) are substantive -- circuit breaker and dry run are critical safety features, and action tracking enables crash recovery. The current v0.2.4 correctly reflects "Phase 1 complete + partial Phase 2."
+
+When all 7 Phase 2 issues are done, then bump to v0.3.0.
+
+---
+
+### Priority summary for improvements
+
+| Priority | Finding | Effort | What it prevents |
+|---|---|---|---|
+| **High** | #4 Cron overlap still not prevented | Small (5 lines in poll.sh) | TOCTOU race on all write tools |
+| **Medium** | #1 maxIssuesPerRun not enforced in code | Small | LLM ignoring the issue cap |
+| **Medium** | #9 System prompt lacks idempotency guidance | Trivial (2 lines) | Agent confusion on skipped tools |
+| **Low** | #2 Comment check pagination gap | Small | Duplicate on 100+ comment issues |
+| **Low** | #6 Skip responses add LLM context noise | Trivial | Agent misinterpreting skips |
+| **Low** | #7 maxIssuesPerRun not validated | Trivial | Bad config values |
+| **Info** | #3 last_poll.json deletion | N/A | Design handles this correctly |
+| **Info** | #5 Edited marker breaks detection | N/A | Acceptable trade-off |
+| **Info** | #8 Closed PR + same branch | N/A | Correct by design |
+
+---
+
+### Cumulative open findings from Entries 7, 11, and 14
+
+| Source | Finding | Status |
+|---|---|---|
+| Entry 7 #1, #13 | Path resolution (relative `./`) | **Still open** |
+| Entry 7 #2 | Config type safety (any) | **Still open** |
+| Entry 7 #4 | process.exit in config.ts | **Still open** |
+| Entry 7 #5 | Labels map type guard | **Still open** |
+| Entry 7 #6 | Cron overlap / lock file | **Still open** -- reinforced by Entry 14 Finding #4 |
+| Entry 7 #8 | Atomic poll state writes | **Still open** |
+| Entry 7 #9 | stderr logging in tool catch blocks | **Still open** |
+| Entry 7 #10 | Bake `since` into tool | **Still open** |
+| Entry 7 #11 | Issue number extraction fragility | **Still open** |
+| Entry 11 #1 | list_repo_files response size | **Still open** |
+| Entry 11 #2 | read_repo_file size guard | **Fixed** (500-line truncation added) |
+| Entry 11 #3 | Binary file garbage | **Still open** |
+| Entry 14 #1 | maxIssuesPerRun not enforced | **New** |
+| Entry 14 #4 | Cron overlap TOCTOU | **New** (extends Entry 7 #6) |
+| Entry 14 #9 | System prompt idempotency guidance | **New** |
+
+---
+
+### Overall assessment
+
+**What the team did well:**
+- All three idempotency patterns are correctly implemented. The hidden marker, 404 detection, and list-filter approaches are all standard patterns used by production GitHub bots.
+- The `{ skipped: true }` return convention is consistent across all three tools and well-designed for LLM consumption.
+- Entry 13's teaching notes are excellent -- the three-pattern comparison is clear and the cost analysis (15 extra API calls) is concrete.
+- `maxIssuesPerRun` is configurable and defaults to a conservative value.
+- The 500-line truncation added to `read_repo_file` shows responsiveness to review feedback (Entry 11 Finding #2).
+- Tool descriptions were updated to mention idempotency, which helps the LLM understand skip behavior.
+
+**What needs attention:**
+- The cron overlap problem (Entry 7 Finding #6) has now been flagged in three separate entries (7, 11, 14) and remains unaddressed. It is the highest-impact open issue. The idempotency checks reduce but do not eliminate the TOCTOU race.
+- `maxIssuesPerRun` is a prompt-based constraint, not a code-enforced one. This matches the `since` parameter problem from Entry 7 Finding #10. The pattern of "tell the LLM via text, hope it complies" is a recurring theme that should be addressed systematically.
+- The system prompt was not updated for Phase 2 behavior. The agent does not know that tools can return `{ skipped: true }`.
+
+**The learning takeaway:** Phase 2 demonstrates **defense-in-depth**: orchestration-level constraints (max issues) and tool-level idempotency work together. Neither alone is sufficient. The orchestrator prevents excessive work; the tools prevent duplicate side effects. But both layers have gaps: the orchestrator relies on LLM compliance, and the tools have TOCTOU races under concurrency. The missing third layer is infrastructure-level protection (lock files, atomic operations) -- which is exactly what the remaining Phase 2 issues (#6 circuit breaker, #7 dry run, #11 action tracking) and Entry 7's lock file recommendation address.
+
+### Connection to next work
+
+Three Phase 2 issues remain: #6 (circuit breaker), #7 (dry run), #11 (action tracking). These address the gaps found in this review:
+- Circuit breaker (#6) adds a hard stop on total tool calls, independent of LLM compliance
+- Dry run (#7) enables testing without side effects
+- Action tracking (#11) enables crash recovery by recording which steps completed per issue
+
+The cron lock file (Entry 7 Finding #6) should be included as a prerequisite or parallel task -- it complements the tool-level idempotency with infrastructure-level concurrency protection.
+
+---

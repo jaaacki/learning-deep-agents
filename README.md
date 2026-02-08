@@ -53,9 +53,12 @@ Edit `config.json`:
     "apiKey": "sk-ant-your_key_here",
     "model": "claude-sonnet-4-20250514",
     "baseUrl": null
-  }
+  },
+  "maxIssuesPerRun": 5
 }
 ```
+
+`maxIssuesPerRun` caps how many issues the agent processes per invocation (default: 5). Lower this for busy repos or higher LLM costs.
 
 #### Other LLM providers
 
