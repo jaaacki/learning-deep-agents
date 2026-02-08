@@ -470,6 +470,68 @@ export function createReadRepoFileTool(owner: string, repo: string, octokit: Oct
   );
 }
 
+/**
+ * Tool: Create or update a file on a branch via the GitHub API
+ * Uses octokit.rest.repos.createOrUpdateFileContents() to commit a single file.
+ * If the file already exists, its current SHA is required (fetched automatically).
+ */
+export function createOrUpdateFileTool(owner: string, repo: string, octokit: Octokit) {
+  return tool(
+    async ({ path, content, message, branch }: { path: string; content: string; message: string; branch: string }) => {
+      try {
+        console.log(`📝 Committing ${path} to ${branch} in ${owner}/${repo}...`);
+
+        // Check if file already exists to get its SHA (needed for updates)
+        let existingSha: string | undefined;
+        try {
+          const { data } = await octokit.rest.repos.getContent({
+            owner,
+            repo,
+            path,
+            ref: branch,
+          });
+          if (!Array.isArray(data) && data.type === 'file') {
+            existingSha = data.sha;
+          }
+        } catch (e: unknown) {
+          const status = (e as { status?: number }).status;
+          if (status !== 404) throw e;
+          // 404 = file doesn't exist yet, that's fine (create mode)
+        }
+
+        const { data: result } = await octokit.rest.repos.createOrUpdateFileContents({
+          owner,
+          repo,
+          path,
+          message,
+          content: Buffer.from(content).toString('base64'),
+          branch,
+          ...(existingSha ? { sha: existingSha } : {}),
+        });
+
+        return JSON.stringify({
+          path,
+          sha: result.content?.sha,
+          commit_sha: result.commit.sha,
+          html_url: result.content?.html_url,
+        });
+      } catch (error) {
+        return `Error committing file '${path}': ${error}`;
+      }
+    },
+    {
+      name: 'create_or_update_file',
+      description: 'Create or update a file on a branch via the GitHub API. Each call creates one commit. Use this to push proposed code changes to a feature branch before opening a PR.',
+      schema: z.object({
+        path: z.string().describe('File path in the repo (e.g., "README.md", "src/utils.ts")'),
+        content: z.string().describe('The full file content to write'),
+        message: z.string().describe('Git commit message for this change'),
+        branch: z.string().describe('The branch to commit to (e.g., "issue-1-improve-readme")'),
+      }),
+    }
+  );
+}
+
 // ── Dry-run wrappers ────────────────────────────────────────────────────────
 // These create replacement tools with the same name/schema as the real ones
 // but log what they WOULD do and return fake success results.
@@ -539,6 +601,32 @@ export function createDryRunPullRequestTool() {
         body: z.string().describe('PR description'),
         head: z.string().describe('The branch containing changes'),
         base: z.string().optional().default('main').describe('The branch to merge into (default: main)'),
+      }),
+    }
+  );
+}
+
+export function createDryRunCreateOrUpdateFileTool() {
+  return tool(
+    async ({ path, content, message, branch }: { path: string; content: string; message: string; branch: string }) => {
+      const preview = content.length > 80 ? content.slice(0, 80) + '...' : content;
+      console.log(`DRY RUN -- would commit ${path} to ${branch}: ${preview}`);
+      return JSON.stringify({
+        dry_run: true,
+        path,
+        sha: '0000000000000000000000000000000000000000',
+        commit_sha: '0000000000000000000000000000000000000000',
+        html_url: `(dry-run) ${path} on ${branch}`,
+      });
+    },
+    {
+      name: 'create_or_update_file',
+      description: 'Create or update a file on a branch. (DRY RUN MODE: will log but not execute)',
+      schema: z.object({
+        path: z.string().describe('File path in the repo'),
+        content: z.string().describe('The full file content to write'),
+        message: z.string().describe('Git commit message'),
+        branch: z.string().describe('The branch to commit to'),
       }),
     }
   );
