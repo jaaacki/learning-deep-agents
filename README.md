@@ -268,7 +268,81 @@ deepagents/
   poll.log            -- Generated: cron run logs (git-ignored)
   LEARNING_LOG.md     -- Project learning narrative
   CLAUDE.md           -- Claude Code project instructions
+  Dockerfile          -- Container image definition
+  docker-compose.yml  -- Bot + Caddy reverse proxy stack
+  Caddyfile           -- Caddy reverse proxy config (TLS termination)
+  .dockerignore       -- Files excluded from Docker build context
 ```
+
+## Docker Deployment
+
+Run the webhook listener behind Caddy with automatic HTTPS.
+
+### Prerequisites
+
+- [Docker](https://docs.docker.com/get-docker/) and Docker Compose
+- A domain name with DNS pointing to your server
+- `config.json` with valid credentials (see Setup above)
+
+### 1. Configure your domain
+
+Edit `Caddyfile` and replace `yourdomain.com` with your actual domain:
+
+```
+yourdomain.com {
+    reverse_proxy bot:3000
+}
+```
+
+Caddy will automatically provision a TLS certificate from Let's Encrypt.
+
+### 2. Create runtime files
+
+The bot needs `last_poll.json` and `issues/` to exist before mounting:
+
+```bash
+touch last_poll.json
+mkdir -p issues
+```
+
+### 3. Build and start
+
+```bash
+docker compose up -d --build
+```
+
+This starts two containers:
+- **bot** -- the webhook listener on port 3000 (internal only)
+- **caddy** -- reverse proxy on ports 80/443 with automatic TLS
+
+### 4. Verify
+
+```bash
+# Check container health
+docker compose ps
+
+# View bot logs
+docker compose logs -f bot
+
+# Test health endpoint
+curl https://yourdomain.com/health
+```
+
+### 5. Point GitHub webhook
+
+In your GitHub repo settings, add a webhook:
+- **Payload URL:** `https://yourdomain.com/webhook`
+- **Content type:** `application/json`
+- **Secret:** same value as `webhook.secret` in your `config.json`
+- **Events:** select "Issues" and "Pull requests"
+
+### Stopping
+
+```bash
+docker compose down
+```
+
+Caddy's TLS certificates persist in the `caddy_data` volume across restarts.
 
 ## How to Reset
 

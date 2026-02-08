@@ -1,0 +1,12 @@
+node_modules/
+.git/
+config.json
+last_poll.json
+poll.log
+poll.lock/
+issues/
+tests/
+.claude/
+CLAUDE.md
+*.md
+!README.md
