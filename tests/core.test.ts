@@ -14,7 +14,8 @@ import {
   isShuttingDown,
   resetShutdown,
 } from '../src/core.js';
-import type { IssueActions } from '../src/core.js';
+import type { IssueActions, PollState } from '../src/core.js';
+import type { TriageOutput } from '../src/triage-agent.js';
 
 // ── getMaxIssues ──────────────────────────────────────────────────────────────
 
@@ -545,5 +546,161 @@ describe('graceful shutdown', () => {
     expect(isShuttingDown()).toBe(true);
     resetShutdown();
     expect(isShuttingDown()).toBe(false);
+  });
+});
+
+// ── buildUserMessage with triage context (triage-to-analysis handoff) ────────
+
+describe('buildUserMessage with triageResults', () => {
+  const sampleTriage: TriageOutput = {
+    issueType: 'bug',
+    complexity: 'moderate',
+    relevantFiles: ['src/core.ts', 'src/agent.ts'],
+    shouldAnalyze: true,
+    summary: 'A null pointer bug in the poll cycle when state is missing.',
+  };
+
+  it('includes triage context header when triageResults are provided', () => {
+    const triage: Record<string, TriageOutput> = { '42': sampleTriage };
+    const msg = buildUserMessage(5, null, [], undefined, triage);
+    expect(msg).toContain('Triage context');
+  });
+
+  it('includes issue number from triage results', () => {
+    const triage: Record<string, TriageOutput> = { '42': sampleTriage };
+    const msg = buildUserMessage(5, null, [], undefined, triage);
+    expect(msg).toContain('Issue #42');
+  });
+
+  it('includes issue type from triage', () => {
+    const triage: Record<string, TriageOutput> = { '42': sampleTriage };
+    const msg = buildUserMessage(5, null, [], undefined, triage);
+    expect(msg).toContain('type=bug');
+  });
+
+  it('includes complexity from triage', () => {
+    const triage: Record<string, TriageOutput> = { '42': sampleTriage };
+    const msg = buildUserMessage(5, null, [], undefined, triage);
+    expect(msg).toContain('complexity=moderate');
+  });
+
+  it('includes relevant files from triage', () => {
+    const triage: Record<string, TriageOutput> = { '42': sampleTriage };
+    const msg = buildUserMessage(5, null, [], undefined, triage);
+    expect(msg).toContain('src/core.ts');
+    expect(msg).toContain('src/agent.ts');
+  });
+
+  it('includes triage summary', () => {
+    const triage: Record<string, TriageOutput> = { '42': sampleTriage };
+    const msg = buildUserMessage(5, null, [], undefined, triage);
+    expect(msg).toContain('null pointer bug');
+  });
+
+  it('shows "none identified" when triage has no relevant files', () => {
+    const noFiles: TriageOutput = { ...sampleTriage, relevantFiles: [] };
+    const triage: Record<string, TriageOutput> = { '7': noFiles };
+    const msg = buildUserMessage(5, null, [], undefined, triage);
+    expect(msg).toContain('none identified');
+  });
+
+  it('includes multiple triage results for multiple issues', () => {
+    const triage: Record<string, TriageOutput> = {
+      '10': { ...sampleTriage, issueType: 'feature', summary: 'Add new endpoint' },
+      '11': { ...sampleTriage, issueType: 'docs', summary: 'Update README' },
+    };
+    const msg = buildUserMessage(5, null, [], undefined, triage);
+    expect(msg).toContain('Issue #10');
+    expect(msg).toContain('Issue #11');
+    expect(msg).toContain('type=feature');
+    expect(msg).toContain('type=docs');
+  });
+
+  it('does not include triage section when triageResults is undefined', () => {
+    const msg = buildUserMessage(5, null, []);
+    expect(msg).not.toContain('Triage context');
+  });
+
+  it('does not include triage section when triageResults is empty', () => {
+    const msg = buildUserMessage(5, null, [], undefined, {});
+    expect(msg).not.toContain('Triage context');
+  });
+
+  it('combines action context and triage context together', () => {
+    const actions: Record<string, IssueActions> = {
+      '5': { comment: { id: 1, html_url: 'u' }, branch: null, commits: [], pr: null },
+    };
+    const triage: Record<string, TriageOutput> = { '42': sampleTriage };
+    const msg = buildUserMessage(5, '2026-01-01T00:00:00Z', [5], actions, triage);
+    // Both sections present
+    expect(msg).toContain('Partially-processed');
+    expect(msg).toContain('Triage context');
+    // Action context for issue 5
+    expect(msg).toContain('Issue #5');
+    // Triage context for issue 42
+    expect(msg).toContain('Issue #42');
+    expect(msg).toContain('type=bug');
+  });
+
+  it('still includes workflow instructions when triage context is present', () => {
+    const triage: Record<string, TriageOutput> = { '42': sampleTriage };
+    const msg = buildUserMessage(5, null, [], undefined, triage);
+    expect(msg).toContain('comment_on_issue');
+    expect(msg).toContain('create_branch');
+    expect(msg).toContain('write_todos');
+  });
+});
+
+// ── PollState triageResults field ────────────────────────────────────────────
+
+describe('PollState triageResults field', () => {
+  it('savePollState persists triageResults when provided', () => {
+    vi.spyOn(fs, 'writeFileSync').mockImplementation(() => {});
+
+    const triage: Record<string, TriageOutput> = {
+      '1': {
+        issueType: 'bug',
+        complexity: 'simple',
+        relevantFiles: ['src/index.ts'],
+        shouldAnalyze: true,
+        summary: 'Simple bug fix.',
+      },
+    };
+    const state: PollState = {
+      lastPollTimestamp: '2026-02-08T12:00:00Z',
+      lastPollIssueNumbers: [1],
+      issues: {},
+      triageResults: triage,
+    };
+    savePollState(state);
+    const [, content] = vi.mocked(fs.writeFileSync).mock.calls[0];
+    const parsed = JSON.parse(content as string);
+    expect(parsed.triageResults).toBeDefined();
+    expect(parsed.triageResults['1'].issueType).toBe('bug');
+    expect(parsed.triageResults['1'].relevantFiles).toEqual(['src/index.ts']);
+
+    vi.restoreAllMocks();
+  });
+
+  it('migratePollState preserves triageResults in enriched format', () => {
+    const state = {
+      lastPollTimestamp: '2026-01-01T00:00:00Z',
+      lastPollIssueNumbers: [1],
+      issues: {
+        '1': { comment: null, branch: null, commits: [], pr: null },
+      },
+      triageResults: {
+        '1': {
+          issueType: 'feature',
+          complexity: 'complex',
+          relevantFiles: [],
+          shouldAnalyze: true,
+          summary: 'New feature.',
+        },
+      },
+    };
+    const result = migratePollState(state);
+    expect(result.triageResults).toBeDefined();
+    expect(result.triageResults!['1'].issueType).toBe('feature');
   });
 });

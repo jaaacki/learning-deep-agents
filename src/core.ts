@@ -50,6 +50,8 @@ export interface PollState {
   lastPollIssueNumbers: number[];
   /** Per-issue action tracking (added in v0.2.10). */
   issues?: Record<string, IssueActions>;
+  /** Per-issue triage results (added in v0.3.8). Passed to the analysis agent as context. */
+  triageResults?: Record<string, TriageOutput>;
 }
 
 const POLL_STATE_FILE = path.resolve('./last_poll.json');
@@ -291,6 +293,7 @@ export function buildUserMessage(
   sinceDate: string | null,
   previousIssues: number[],
   issueActions?: Record<string, IssueActions>,
+  triageResults?: Record<string, TriageOutput>,
 ): string {
   const pollingContext = sinceDate
     ? `Fetch open issues updated since ${sinceDate} (limit: ${maxIssues}) and analyze any new ones. ` +
@@ -317,7 +320,17 @@ export function buildUserMessage(
     }
   }
 
-  return pollingContext + actionContext + `
+  // Build triage context so the analysis agent knows what triage already found
+  let triageContext = '';
+  if (triageResults && Object.keys(triageResults).length > 0) {
+    const entries = Object.entries(triageResults).map(([num, t]) => {
+      const files = t.relevantFiles.length > 0 ? t.relevantFiles.join(', ') : 'none identified';
+      return `  Issue #${num}: type=${t.issueType}, complexity=${t.complexity}, relevant_files=[${files}]\n    Summary: ${t.summary}`;
+    });
+    triageContext = `\n\nTriage context (from the triage agent -- use this to guide your analysis):\n${entries.join('\n')}`;
+  }
+
+  return pollingContext + actionContext + triageContext + `
 
 For each new/updated issue:
 1. Analyze the issue
@@ -440,6 +453,10 @@ export async function runPollCycle(config: Config, options: { noSave?: boolean; 
 
   const previousIssueNumbers = pollState?.lastPollIssueNumbers ?? [];
 
+  // Triage results collected during triage phase, keyed by issue number.
+  // Passed to the analysis agent so it has context about what triage found.
+  let collectedTriageResults: Record<string, TriageOutput> = {};
+
   if (!options.skipTriage) {
     console.log('\u{1F50E} Fetching issues for triage...');
     const issues = await fetchIssuesForPoll(config, maxIssues, sinceDate);
@@ -500,6 +517,11 @@ export async function runPollCycle(config: Config, options: { noSave?: boolean; 
 
     console.log(`\n\u{1F4CA} Triage summary: ${toAnalyze.length} to analyze, ${skipped.length} skipped\n`);
 
+    // Collect triage results for issues that will be analyzed (keyed by issue number)
+    for (const r of toAnalyze) {
+      collectedTriageResults[String(r.issue.number)] = r.triage;
+    }
+
     if (toAnalyze.length === 0) {
       console.log('\u{2705} All issues were skipped by triage. Nothing to analyze.\n');
 
@@ -556,12 +578,13 @@ export async function runPollCycle(config: Config, options: { noSave?: boolean; 
   const agent = createDeepAgentWithGitHub(config, { maxIssues, dryRun: options.dryRun, maxToolCalls });
   console.log('\u{2705} Agent ready!\n');
 
-  // Build user message (include action context for partially-processed issues)
+  // Build user message (include action + triage context for the analysis agent)
   const userMessage = buildUserMessage(
     maxIssues,
     sinceDate,
     previousIssueNumbers,
     pollState?.issues,
+    collectedTriageResults,
   );
 
   // Run the agent
@@ -608,10 +631,13 @@ export async function runPollCycle(config: Config, options: { noSave?: boolean; 
   );
 
   if (!skipSave) {
+    // Merge new triage results with any existing ones from previous polls
+    const mergedTriageResults = { ...pollState?.triageResults, ...collectedTriageResults };
     savePollState({
       lastPollTimestamp: new Date().toISOString(),
       lastPollIssueNumbers: processedNumbers,
       issues: issueActions,
+      triageResults: Object.keys(mergedTriageResults).length > 0 ? mergedTriageResults : undefined,
     });
     console.log(`\n\u{1F4BE} Poll state saved to ${POLL_STATE_FILE}`);
   } else {
