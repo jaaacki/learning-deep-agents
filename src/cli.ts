@@ -7,7 +7,7 @@ import { runPollCycle, runAnalyzeSingle, showStatus } from './core.js';
  * CLI entry point for the Deep Agents GitHub Issue Poller.
  *
  * Usage:
- *   deepagents poll [--dry-run] [--max-issues N]
+ *   deepagents poll [--no-save] [--max-issues N]
  *   deepagents analyze --issue N
  *   deepagents status
  *
@@ -24,7 +24,7 @@ Commands:
   help              Show this help message
 
 Options for 'poll':
-  --dry-run         Run without saving poll state (no write operations skipped)
+  --no-save         Run without saving poll state (GitHub writes still execute)
   --max-issues N    Override maxIssuesPerRun from config
 
 Options for 'analyze':
@@ -32,7 +32,7 @@ Options for 'analyze':
 
 Examples:
   deepagents poll
-  deepagents poll --dry-run
+  deepagents poll --no-save
   deepagents poll --max-issues 3
   deepagents analyze --issue 42
   deepagents status
@@ -46,8 +46,8 @@ function parseArgs(argv: string[]): { command: string; flags: Record<string, str
 
   for (let i = 1; i < args.length; i++) {
     const arg = args[i];
-    if (arg === '--dry-run') {
-      flags['dry-run'] = true;
+    if (arg === '--no-save') {
+      flags['no-save'] = true;
     } else if (arg === '--max-issues' && i + 1 < args.length) {
       flags['max-issues'] = args[++i];
     } else if (arg === '--issue' && i + 1 < args.length) {
@@ -75,7 +75,7 @@ async function main() {
 
   switch (command) {
     case 'poll': {
-      const dryRun = flags['dry-run'] === true;
+      const dryRun = flags['no-save'] === true;
       const maxIssuesStr = flags['max-issues'];
       const maxIssues = typeof maxIssuesStr === 'string' ? parseInt(maxIssuesStr, 10) : undefined;
 
@@ -108,9 +108,9 @@ async function main() {
       break;
     }
 
-    case 'dry-run': {
-      // Shorthand for `poll --dry-run`
-      console.log('\u{1F916} Deep Agents GitHub Issue Poller (Dry Run)\n');
+    case 'no-save': {
+      // Shorthand for `poll --no-save`
+      console.log('\u{1F916} Deep Agents GitHub Issue Poller (No-Save Mode)\n');
       await runPollCycle(config, { dryRun: true });
       break;
     }

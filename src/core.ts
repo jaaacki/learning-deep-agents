@@ -116,7 +116,9 @@ export async function runPollCycle(config: Config, options: { dryRun?: boolean; 
   console.log(`\u{2705} Config loaded: ${config.github.owner}/${config.github.repo}`);
   console.log(`\u{1F6E1}\uFE0F  Max issues per run: ${maxIssues}`);
   if (options.dryRun) {
-    console.log('\u{1F9EA} DRY RUN MODE -- no write operations will be executed');
+    console.log('\u{1F9EA} NO-SAVE MODE -- poll state will NOT be saved after this run');
+    console.log('   NOTE: GitHub operations (comments, branches, PRs) WILL still execute.');
+    console.log('   For a full dry run that skips GitHub writes, see Issue #7.');
   }
   console.log('');
 
@@ -168,7 +170,7 @@ export async function runPollCycle(config: Config, options: { dryRun?: boolean; 
     });
     console.log(`\n\u{1F4BE} Poll state saved to ${POLL_STATE_FILE}`);
   } else {
-    console.log(`\n\u{1F9EA} Dry run -- poll state NOT saved`);
+    console.log(`\n\u{1F9EA} No-save mode -- poll state NOT saved`);
   }
   console.log(`   Processed issues: ${processedNumbers.join(', ')}`);
 }
