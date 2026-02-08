@@ -11,6 +11,10 @@
     "baseUrl": null
   },
   "triageLlm": null,
+  "webhook": {
+    "port": 3000,
+    "secret": "your-webhook-secret"
+  },
   "maxIssuesPerRun": 5,
   "maxToolCallsPerRun": 30
 }

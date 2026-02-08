@@ -9,6 +9,25 @@
 
 ---
 
+## v0.3.5 — 2026-02-08
+
+### Added
+- **HTTP webhook listener** (Issue #12) — Express server to receive GitHub webhook events
+- New `src/listener.ts` with `createWebhookApp()` and `startWebhookServer()` factories
+- POST `/webhook` endpoint with HMAC-SHA256 signature verification (`X-Hub-Signature-256`)
+- GET `/health` health check endpoint
+- Event type parsing from `X-GitHub-Event` header with delivery ID tracking
+- `webhook` config section: `{ port, secret }` with validation in `config.ts`
+- `deepagents webhook` CLI subcommand to start the listener
+- `pnpm webhook` script shorthand
+- 20 new unit tests (15 listener + 5 config) covering signature verification, endpoint behavior, config validation
+- `express` added as production dependency, `@types/express` as dev dependency
+
+### Changed
+- `config.json.example` updated with `webhook` section placeholder
+
+---
+
 ## v0.3.4 — 2026-02-08
 
 ### Added

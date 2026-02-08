@@ -162,4 +162,69 @@ describe('loadConfig', () => {
     const config = loadConfig();
     expect(config.triageLlm.provider).toBe('ollama');
   });
+
+  // ── webhook config validation ──────────────────────────────────────────────
+
+  it('accepts config with valid webhook section', () => {
+    const webhookConfig = {
+      ...validConfig,
+      webhook: { port: 3000, secret: 'my-webhook-secret' },
+    };
+    vi.mocked(fs.existsSync).mockReturnValue(true);
+    vi.mocked(fs.readFileSync).mockReturnValue(JSON.stringify(webhookConfig));
+
+    const config = loadConfig();
+    expect(config.webhook.port).toBe(3000);
+    expect(config.webhook.secret).toBe('my-webhook-secret');
+  });
+
+  it('accepts config without webhook section', () => {
+    vi.mocked(fs.existsSync).mockReturnValue(true);
+    vi.mocked(fs.readFileSync).mockReturnValue(JSON.stringify(validConfig));
+
+    const config = loadConfig();
+    expect(config.webhook).toBeUndefined();
+  });
+
+  it('exits when webhook.port is out of range', () => {
+    const bad = {
+      ...validConfig,
+      webhook: { port: 99999, secret: 'secret' },
+    };
+    vi.mocked(fs.existsSync).mockReturnValue(true);
+    vi.mocked(fs.readFileSync).mockReturnValue(JSON.stringify(bad));
+
+    expect(() => loadConfig()).toThrow('process.exit');
+    expect(console.error).toHaveBeenCalledWith(
+      expect.stringContaining('webhook.port must be a number between 1 and 65535')
+    );
+  });
+
+  it('exits when webhook.port is not a number', () => {
+    const bad = {
+      ...validConfig,
+      webhook: { port: 'abc', secret: 'secret' },
+    };
+    vi.mocked(fs.existsSync).mockReturnValue(true);
+    vi.mocked(fs.readFileSync).mockReturnValue(JSON.stringify(bad));
+
+    expect(() => loadConfig()).toThrow('process.exit');
+    expect(console.error).toHaveBeenCalledWith(
+      expect.stringContaining('webhook.port must be a number between 1 and 65535')
+    );
+  });
+
+  it('exits when webhook.secret is missing', () => {
+    const bad = {
+      ...validConfig,
+      webhook: { port: 3000, secret: '' },
+    };
+    vi.mocked(fs.existsSync).mockReturnValue(true);
+    vi.mocked(fs.readFileSync).mockReturnValue(JSON.stringify(bad));
+
+    expect(() => loadConfig()).toThrow('process.exit');
+    expect(console.error).toHaveBeenCalledWith(
+      expect.stringContaining('webhook.secret is required')
+    );
+  });
 });

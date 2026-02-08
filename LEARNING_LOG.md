@@ -4372,3 +4372,56 @@ One existing test in `github-tools.test.ts` was updated: the "re-throws non-404 
 - Integration with the circuit breaker counter (retries are invisible to it -- by design)
 
 These are reasonable future enhancements but not needed for the current learning project scope.
+
+---
+
+## Entry 31: Webhook Listener -- From Polling to Push (Issue #12)
+
+**Date:** 2026-02-08
+**Author:** Builder Agent
+**Builds on:** Entry 1 (Polling Architecture), Entry 15 (CLI Wrapper)
+
+### What just happened?
+
+We added an HTTP webhook listener as an alternative trigger mechanism to cron-based polling. The listener receives GitHub webhook deliveries at `POST /webhook`, verifies the HMAC-SHA256 signature, parses event metadata from headers, and logs the event. Actual event routing to agent workflows is deferred to Issues #13/#14.
+
+### Why webhooks vs polling?
+
+Cron polling has two limitations:
+
+1. **Latency** -- a 15-minute cron interval means up to 15 minutes of delay between an issue being opened and the agent responding. Webhooks deliver events in near-real-time (seconds).
+2. **Wasted runs** -- cron fires even when nothing changed, burning API calls and compute. Webhooks only fire when an event actually occurs.
+
+Both modes coexist: `deepagents webhook` starts the listener (long-running), while `deepagents poll` via `poll.sh` remains for environments where webhooks are impractical (no public IP, firewall restrictions, etc.). The same agent code runs underneath either trigger -- the listener just replaces the cron schedule with HTTP push.
+
+### HMAC-SHA256 verification: why it matters
+
+GitHub signs every webhook delivery with an HMAC using a shared secret. The signature arrives in the `X-Hub-Signature-256` header as `sha256=<hex>`. The listener must:
+
+1. Compute HMAC-SHA256 over the raw request body using the configured secret
+2. Compare the computed digest to the provided digest
+3. Use timing-safe comparison to prevent timing attacks
+
+**Why timing-safe comparison?** A naive string comparison (`===`) short-circuits on the first differing character. An attacker could measure response times to progressively guess the correct signature one character at a time. `crypto.timingSafeEqual` takes constant time regardless of where the strings differ.
+
+**Why compare as UTF-8 strings, not decoded hex?** `Buffer.from(hexString, 'hex')` silently skips invalid hex characters, producing a shorter buffer than expected. This causes `timingSafeEqual` to throw a `RangeError` on length mismatch. By comparing the hex strings as UTF-8 buffers (which always produce predictable lengths), we avoid this edge case entirely.
+
+### Express raw body middleware
+
+The webhook endpoint uses `express.raw({ type: 'application/json' })` instead of `express.json()`. This is intentional: HMAC verification must run over the exact bytes GitHub sent. If Express parsed the JSON first and we re-serialized it, whitespace differences could change the digest.
+
+### Architecture: why `createWebhookApp` returns the app, not the server
+
+The `createWebhookApp()` factory returns the configured Express app without calling `.listen()`. The separate `startWebhookServer()` function calls `.listen()` and returns the HTTP server. This separation lets tests inject requests into the app without binding a port, avoiding port conflicts in parallel test runs.
+
+### Coexistence design
+
+The listener is a standalone long-running process, not integrated into the poll cycle. This is deliberate:
+
+- Polling is one-shot (run, process, exit) -- clean for cron
+- Webhook listening is persistent (start, wait, handle events in a loop)
+- Mixing them would create awkward lifecycle management
+
+Future work (#13/#14) will wire webhook events to the same `runAnalyzeSingle()` and triage functions, creating a shared code path between both triggers.
+
+---
