@@ -9,6 +9,21 @@
 
 ---
 
+## v0.3.3 — 2026-02-08
+
+### Added
+- **Structured logging for tool calls** (Issue #33) — every tool invocation logs name, arguments, timing, and circuit breaker headroom
+- New `src/logger.ts` with `wrapWithLogging()` composable wrapper function
+- Log format: `[HH:MM:SS] TOOL #N/M | tool_name | { args } | Xms`
+- Errors logged to stderr with context before re-throwing
+- 9 new unit tests in `tests/logger.test.ts`
+
+### Changed
+- `src/agent.ts` applies logging wrapper as outermost layer on all 7 tools
+- `src/triage-agent.ts` applies logging wrapper on all 3 read-only tools
+
+---
+
 ## v0.3.2 — 2026-02-08
 
 ### Added

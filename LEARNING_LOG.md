@@ -4272,3 +4272,50 @@ This does not block the merge because the triage agent itself works correctly in
 **Recommendation to team lead:** Merge is safe -- the triage agent is a standalone component that works correctly. The handoff gap should be tracked as a known limitation and addressed in Issue #4. A `// TODO(Issue #4)` comment in `core.ts` at the analysis phase boundary would make this explicit.
 
 ---
+
+## Entry 29: Composable Middleware -- Structured Logging via Tool Wrapping (Issue #33)
+
+**Date:** 2026-02-08
+**Author:** Builder Agent
+**Builds on:** Entry 20 (Circuit Breaker), Entry 24 (Two-Phase Pipeline)
+
+### What just happened?
+
+We added structured logging for every tool call. Each invocation now logs:
+- Timestamp (HH:MM:SS)
+- Running tool count and circuit breaker headroom (e.g., `#7/30`)
+- Tool name
+- Arguments (compact JSON)
+- Duration in milliseconds
+
+Errors are logged to `console.error` with the same format plus the error message, then re-thrown so the circuit breaker and agent framework can handle them normally.
+
+### Why this design: Composable middleware via `wrapWithLogging()`
+
+The key pattern here is **composable tool wrappers** -- small functions that each add one behavior by wrapping `tool.invoke()`. The tool wrapping stack is now:
+
+```
+LLM calls tool.invoke(input)
+  -> wrapWithLogging    (outermost: logs args, timing, errors)
+    -> wrapWithCircuitBreaker  (increments counter, may throw)
+      -> original tool.invoke  (actual API call)
+```
+
+This is the middleware/decorator pattern applied to LangChain tools. Each wrapper:
+1. Takes a tool and returns the same tool with a modified `.invoke()`
+2. Does not know about the other wrappers
+3. Can be applied in any order (though order matters for semantics)
+
+**Why logging is the outermost layer:** If logging wrapped inside the circuit breaker, a breaker trip would prevent the log from being written. By placing logging outside, we see the attempted call and the error in the log even when the breaker trips.
+
+**Why a separate `src/logger.ts` file:** The circuit breaker lives in `github-tools.ts` because it was the first wrapper and was tightly coupled to tool creation. But as more wrappers accumulate (logging, retry, rate limiting), keeping them in the tools file creates coupling between unrelated concerns. A separate file per wrapper keeps each composable unit independent. The retry wrapper (Issue #17) should follow the same pattern.
+
+### The `ToolCallCounter` as a read-only dependency
+
+The logging wrapper accepts an optional `ToolCallCounter` to display headroom (`#7/30`). It reads the counter but never increments it -- incrementing is the circuit breaker's job. This avoids double-counting and keeps responsibilities clear: the counter has one writer (circuit breaker) and one reader (logger).
+
+### What NOT to log
+
+The issue explicitly calls out that tool **responses** should not be logged. For tools like `read_repo_file`, the response is an entire file's contents -- logging it would flood the terminal and duplicate data that is already visible in the LLM's context. Arguments are small (a file path, a branch name), so they provide useful debugging context without volume.
+
+---
