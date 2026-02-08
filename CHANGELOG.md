@@ -9,6 +9,40 @@
 
 ---
 
+## v0.3.5 — 2026-02-08
+
+### Added
+- **Graceful shutdown** (Issue #22) — SIGTERM/SIGINT handlers save poll state before exiting
+- `requestShutdown()`, `isShuttingDown()`, `resetShutdown()` exported from `src/core.ts`
+- Signal handlers registered in both `src/index.ts` and `src/cli.ts`
+- Shutdown checks at three points in `runPollCycle()`: between triage iterations, after triage phase, before analysis phase
+- 4 new unit tests in `tests/core.test.ts` (`describe('graceful shutdown', ...)`)
+
+### Changed
+- `process.exit(1)` replaced with `process.exitCode = 1` in entry point error handlers (allows pending I/O to flush)
+- `process.exit(2)` replaced with `process.exitCode = 2` for circuit breaker exit (same rationale)
+
+---
+
+## v0.3.4 — 2026-02-08
+
+### Added
+- **HTTP webhook listener** (Issue #12) — Express server to receive GitHub webhook events
+- New `src/listener.ts` with `createWebhookApp()` and `startWebhookServer()` factories
+- POST `/webhook` endpoint with HMAC-SHA256 signature verification (`X-Hub-Signature-256`)
+- GET `/health` health check endpoint
+- Event type parsing from `X-GitHub-Event` header with delivery ID tracking
+- `webhook` config section: `{ port, secret }` with validation in `config.ts`
+- `deepagents webhook` CLI subcommand to start the listener
+- `pnpm webhook` script shorthand
+- 20 new unit tests (15 listener + 5 config) covering signature verification, endpoint behavior, config validation
+- `express` added as production dependency, `@types/express` as dev dependency
+
+### Changed
+- `config.json.example` updated with `webhook` section placeholder
+
+---
+
 ## v0.3.3 — 2026-02-08
 
 ### Added

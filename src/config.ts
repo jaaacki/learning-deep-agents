@@ -39,6 +39,18 @@ export function loadConfig() {
     }
   }
 
+  // Validate webhook config if present (optional -- only needed for `deepagents webhook`)
+  if (config.webhook) {
+    if (typeof config.webhook.port !== 'number' || config.webhook.port < 1 || config.webhook.port > 65535) {
+      console.error('❌ webhook.port must be a number between 1 and 65535');
+      process.exit(1);
+    }
+    if (!config.webhook.secret || typeof config.webhook.secret !== 'string') {
+      console.error('❌ webhook.secret is required when webhook is configured');
+      process.exit(1);
+    }
+  }
+
   return config;
 }
 

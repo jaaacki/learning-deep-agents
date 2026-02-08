@@ -1,7 +1,20 @@
 #!/usr/bin/env node
 
 import { loadConfig } from './config.js';
-import { runPollCycle, runAnalyzeSingle, runTriageSingle, showStatus } from './core.js';
+import { runPollCycle, runAnalyzeSingle, runTriageSingle, showStatus, requestShutdown } from './core.js';
+import { startWebhookServer } from './listener.js';
+
+// ── Signal handlers for graceful shutdown ────────────────────────────────────
+
+process.on('SIGTERM', () => {
+  console.log('\nReceived SIGTERM, finishing current work...');
+  requestShutdown();
+});
+
+process.on('SIGINT', () => {
+  console.log('\nReceived SIGINT, finishing current work...');
+  requestShutdown();
+});
 
 /**
  * CLI entry point for the Deep Agents GitHub Issue Poller.
@@ -21,6 +34,7 @@ Commands:
   poll              Run a poll cycle: fetch, analyze, comment, branch, PR
   analyze           Analyze a single issue by number
   triage            Run triage on a single issue (classify without side effects)
+  webhook           Start the HTTP webhook listener for GitHub events
   status            Show current polling state
   help              Show this help message
 
@@ -43,6 +57,7 @@ Examples:
   deepagents poll --max-issues 3
   deepagents analyze --issue 42
   deepagents triage --issue 42
+  deepagents webhook
   deepagents status
 `.trim();
 
@@ -147,6 +162,18 @@ async function main() {
       break;
     }
 
+    case 'webhook': {
+      if (!config.webhook) {
+        console.error('webhook config section is required in config.json');
+        console.error('Add: "webhook": { "port": 3000, "secret": "your-secret" }');
+        process.exit(1);
+      }
+      console.log('\u{1F916} Deep Agents Webhook Listener\n');
+      startWebhookServer(config.webhook);
+      // Server runs until process is killed (SIGTERM/SIGINT)
+      break;
+    }
+
     case 'no-save': {
       // Shorthand for `poll --no-save`
       console.log('\u{1F916} Deep Agents GitHub Issue Poller (No-Save Mode)\n');
@@ -168,5 +195,5 @@ async function main() {
 
 main().catch((error) => {
   console.error('\u{274C} Error:', error);
-  process.exit(1);
+  process.exitCode = 1;
 });
