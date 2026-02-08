@@ -9,6 +9,21 @@
 
 ---
 
+## v0.3.7 — 2026-02-08
+
+### Changed
+- **Enriched action tracking metadata** (Issue #31) — `IssueActions` now stores full API response metadata instead of simple booleans
+- `comment` field: `{ id, html_url }` (was `commented: boolean`)
+- `branch` field: `{ name, sha }` (was `branch: string | null`)
+- `commits` field: `Array<{ path, sha, commit_sha }>` (new)
+- `pr` field: `{ number, html_url }` (was `pr: number | null`)
+- `extractIssueActions()` now correlates tool calls with responses using pending-state tracking
+- `migratePollState()` handles 3 format generations: pre-v0.2.10, v0.2.10 boolean, v0.3.7+ enriched
+- `buildUserMessage()` and `showStatus()` updated to use enriched field names
+- 12 new enriched metadata tests + existing tests updated
+
+---
+
 ## v0.3.6 — 2026-02-08
 
 ### Added

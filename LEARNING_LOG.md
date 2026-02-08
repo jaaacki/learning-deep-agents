@@ -4466,3 +4466,45 @@ Once the LLM agent is running (`agent.invoke()`), we can't easily interrupt it m
 Signal handlers in Node.js run in the main thread's event loop, so they're safe to use with `console.log()` and simple variable assignment. Unlike C where signal handlers have severe restrictions (only async-signal-safe functions), Node.js handlers are regular JavaScript callbacks scheduled by libuv. The key constraint is: don't do heavy async work in the handler itself -- just set a flag and let the main code path check it.
 
 ---
+
+## Entry 33: Enriching Action Tracking -- State Schema Evolution (Issue #31)
+
+**Date:** 2026-02-08
+**Author:** Builder Agent
+**Scope:** `IssueActions` interface in `src/core.ts`, `extractIssueActions()`, `migratePollState()`, `buildUserMessage()`, `showStatus()`
+
+### Why This Design
+
+The original `IssueActions` tracked simple booleans (`commented: true`) and primitive values (`branch: string`, `pr: number`). This was enough to know *whether* an action happened but not enough to *retract* it. If the agent posts a bad comment, you need the comment ID to delete it. If it pushes a broken file, you need the file SHA to revert it.
+
+Enriched metadata solves this: each action now stores the full API response identifiers (IDs, SHAs, URLs) needed for future retraction workflows.
+
+### Key Design Decisions
+
+**1. Schema shape -- objects instead of scalars:**
+- `comment: { id: number; html_url: string } | null` (was `commented: boolean`)
+- `branch: { name: string; sha: string } | null` (was `branch: string | null`)
+- `commits: Array<{ path, sha, commit_sha }>` (new -- tracks every file committed)
+- `pr: { number: number; html_url: string } | null` (was `pr: number | null`)
+
+Null means "not done yet". An object means "done, here's the metadata".
+
+**2. Tool call / response correlation via pending state:**
+The agent's message history alternates: tool_call message, then tool_response message. `extractIssueActions` uses pending-state variables (`pendingCommentIssue`, `pendingBranchIssue`, etc.) to remember which tool call is awaiting a response. When the next message contains parseable JSON matching the expected response shape, the metadata is captured.
+
+**3. Three-generation migration:**
+`migratePollState()` handles:
+- Case 1: pre-v0.2.10 -- no `issues` field at all (creates stub enriched entries)
+- Case 2: v0.2.10 -- boolean format `{ commented, branch, pr }` (converts via `migrateActionEntry()`)
+- Case 3: v0.3.7+ -- enriched format (pass through)
+
+Detection uses `isOldActionFormat()` which checks `typeof entry.commented === 'boolean'`.
+
+**4. Backwards-compatible serialization:**
+The enriched format is a superset. Old consumers that don't understand the new fields will fail gracefully because the field names changed (`commented` -> `comment`). The migration path is one-way: old -> enriched.
+
+### What This Enables (Future)
+
+- **Retraction:** Delete comments by ID, revert files by SHA, close PRs by number
+- **Audit trail:** Full provenance of every action the agent took
+- **Resumption with context:** The agent knows exactly what was committed, not just that "a branch exists"

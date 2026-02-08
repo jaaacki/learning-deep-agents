@@ -32,11 +32,13 @@ export function resetShutdown(): void {
 /**
  * Per-issue action tracking. Records which workflow steps have been
  * completed so the agent can resume partially-processed issues.
+ * v0.3.4: enriched with full response metadata for retraction capability.
  */
 export interface IssueActions {
-  commented: boolean;
-  branch: string | null;
-  pr: number | null;
+  comment: { id: number; html_url: string } | null;
+  branch: { name: string; sha: string } | null;
+  commits: Array<{ path: string; sha: string; commit_sha: string }>;
+  pr: { number: number; html_url: string } | null;
 }
 
 /**
@@ -72,24 +74,60 @@ export function loadPollState(): PollState | null {
 }
 
 /**
- * Migrate old poll state format (no `issues` field) to new format.
- * Old format: { lastPollTimestamp, lastPollIssueNumbers }
- * New format: adds `issues` record with empty actions for each known issue.
+ * Check if an issue actions entry uses the old v0.2.10 boolean format.
+ */
+function isOldActionFormat(entry: any): boolean {
+  return typeof entry.commented === 'boolean';
+}
+
+/**
+ * Migrate a single v0.2.10 boolean action entry to the enriched format.
+ */
+function migrateActionEntry(old: any): IssueActions {
+  return {
+    comment: old.commented ? { id: 0, html_url: '' } : null,
+    branch: old.branch ? { name: old.branch, sha: '' } : null,
+    commits: [],
+    pr: (old.pr !== null && old.pr > 0) ? { number: old.pr, html_url: '' } : null,
+  };
+}
+
+/**
+ * Migrate poll state across 3 format generations:
+ *   Case 1: pre-v0.2.10 — no `issues` field at all
+ *   Case 2: v0.2.10 — `issues` with boolean format { commented, branch, pr }
+ *   Case 3: v0.3.4+ — enriched format { comment, branch, commits, pr }
  */
 export function migratePollState(raw: any): PollState {
-  if (raw.issues) return raw as PollState;
-
-  // Old format: create stub action records for known issue numbers
-  const issues: Record<string, IssueActions> = {};
-  for (const num of raw.lastPollIssueNumbers ?? []) {
-    issues[String(num)] = { commented: true, branch: null, pr: null };
+  // Case 1: pre-v0.2.10 — no issues field
+  if (!raw.issues) {
+    const issues: Record<string, IssueActions> = {};
+    for (const num of raw.lastPollIssueNumbers ?? []) {
+      issues[String(num)] = { comment: { id: 0, html_url: '' }, branch: null, commits: [], pr: null };
+    }
+    return {
+      lastPollTimestamp: raw.lastPollTimestamp,
+      lastPollIssueNumbers: raw.lastPollIssueNumbers ?? [],
+      issues,
+    };
   }
 
-  return {
-    lastPollTimestamp: raw.lastPollTimestamp,
-    lastPollIssueNumbers: raw.lastPollIssueNumbers ?? [],
-    issues,
-  };
+  // Case 2: v0.2.10 boolean format
+  const entries = Object.values(raw.issues);
+  if (entries.length > 0 && isOldActionFormat(entries[0])) {
+    const migrated: Record<string, IssueActions> = {};
+    for (const [num, entry] of Object.entries(raw.issues)) {
+      migrated[num] = migrateActionEntry(entry);
+    }
+    return {
+      lastPollTimestamp: raw.lastPollTimestamp,
+      lastPollIssueNumbers: raw.lastPollIssueNumbers ?? [],
+      issues: migrated,
+    };
+  }
+
+  // Case 3: already enriched format
+  return raw as PollState;
 }
 
 export function savePollState(state: PollState): void {
@@ -127,8 +165,8 @@ export function extractProcessedIssues(
 
 /**
  * Extract per-issue action tracking from the agent's conversation messages.
- * Scans tool calls for comment, branch, and PR operations and records
- * which issues they targeted.
+ * Correlates tool calls with their responses to capture full metadata
+ * (comment IDs, branch SHAs, file SHAs, PR numbers/URLs).
  */
 export function extractIssueActions(
   messages: Array<{ tool_calls?: Array<{ name?: string; args?: Record<string, unknown> }>; content?: unknown }>,
@@ -136,56 +174,104 @@ export function extractIssueActions(
 ): Record<string, IssueActions> {
   const actions: Record<string, IssueActions> = { ...existing };
 
-  // Helper to ensure an entry exists for an issue
   function ensureEntry(issueNum: string): IssueActions {
     if (!actions[issueNum]) {
-      actions[issueNum] = { commented: false, branch: null, pr: null };
+      actions[issueNum] = { comment: null, branch: null, commits: [], pr: null };
     }
     return actions[issueNum];
   }
 
+  let pendingCommentIssue: string | null = null;
+  let pendingBranchIssue: string | null = null;
+  let pendingBranchName: string | null = null;
+  let pendingCommitIssue: string | null = null;
+  let pendingPrIssue: string | null = null;
+
   for (const msg of messages) {
-    if (!msg.tool_calls) continue;
-    for (const call of msg.tool_calls) {
-      const args = call.args ?? {};
+    if (msg.tool_calls) {
+      for (const call of msg.tool_calls) {
+        const args = call.args ?? {};
 
-      if (call.name === 'comment_on_issue' && args.issue_number) {
-        const entry = ensureEntry(String(args.issue_number));
-        entry.commented = true;
-      }
-
-      if (call.name === 'create_branch' && args.branch_name) {
-        // Try to extract issue number from branch name pattern: issue-<N>-...
-        const branchMatch = String(args.branch_name).match(/^issue-(\d+)/);
-        if (branchMatch) {
-          const entry = ensureEntry(branchMatch[1]);
-          entry.branch = String(args.branch_name);
+        if (call.name === 'comment_on_issue' && args.issue_number) {
+          pendingCommentIssue = String(args.issue_number);
+          ensureEntry(pendingCommentIssue);
         }
-      }
 
-      if (call.name === 'create_pull_request' && args.head) {
-        // Try to extract issue number from head branch pattern
-        const headMatch = String(args.head).match(/^issue-(\d+)/);
-        if (headMatch) {
-          const entry = ensureEntry(headMatch[1]);
-          // We don't know the PR number from the tool call args alone,
-          // but we know a PR was attempted. Mark with -1 as "attempted".
-          if (entry.pr === null) entry.pr = -1;
+        if (call.name === 'create_branch' && args.branch_name) {
+          const branchMatch = String(args.branch_name).match(/^issue-(\d+)/);
+          if (branchMatch) {
+            pendingBranchIssue = branchMatch[1];
+            pendingBranchName = String(args.branch_name);
+            ensureEntry(pendingBranchIssue);
+          }
+        }
+
+        if (call.name === 'create_or_update_file' && args.branch) {
+          const branchMatch = String(args.branch).match(/^issue-(\d+)/);
+          if (branchMatch) {
+            pendingCommitIssue = branchMatch[1];
+            ensureEntry(pendingCommitIssue);
+          }
+        }
+
+        if (call.name === 'create_pull_request' && args.head) {
+          const headMatch = String(args.head).match(/^issue-(\d+)/);
+          if (headMatch) {
+            pendingPrIssue = headMatch[1];
+            ensureEntry(pendingPrIssue);
+          }
         }
       }
     }
 
-    // Check tool responses for PR numbers
     if (typeof msg.content === 'string') {
       try {
         const parsed = JSON.parse(msg.content);
+
+        if (pendingCommentIssue && parsed.id && parsed.html_url && typeof parsed.body === 'string') {
+          ensureEntry(pendingCommentIssue).comment = { id: parsed.id, html_url: parsed.html_url };
+          pendingCommentIssue = null;
+        }
+
+        if (pendingBranchIssue && pendingBranchName && parsed.ref && parsed.object?.sha) {
+          ensureEntry(pendingBranchIssue).branch = { name: pendingBranchName, sha: parsed.object.sha };
+          pendingBranchIssue = null;
+          pendingBranchName = null;
+        }
+
+        if (pendingCommitIssue && parsed.content?.sha && parsed.commit?.sha) {
+          ensureEntry(pendingCommitIssue).commits.push({
+            path: parsed.content.path ?? '',
+            sha: parsed.content.sha,
+            commit_sha: parsed.commit.sha,
+          });
+          pendingCommitIssue = null;
+        }
+
         if (parsed.number && parsed.html_url && parsed.draft !== undefined) {
-          // This looks like a PR response. Try to find the issue from the title.
           const titleMatch = String(parsed.title ?? '').match(/Fix #(\d+)/);
-          const urlMatch = String(parsed.html_url ?? '').match(/\/pull\/(\d+)/);
-          if (titleMatch && urlMatch) {
-            const entry = ensureEntry(titleMatch[1]);
-            entry.pr = parsed.number;
+          if (titleMatch) {
+            ensureEntry(titleMatch[1]).pr = { number: parsed.number, html_url: parsed.html_url };
+            pendingPrIssue = null;
+          } else if (pendingPrIssue) {
+            ensureEntry(pendingPrIssue).pr = { number: parsed.number, html_url: parsed.html_url };
+            pendingPrIssue = null;
+          }
+        }
+
+        if (parsed.skipped) {
+          if (pendingCommentIssue && parsed.existing_comment_url) {
+            ensureEntry(pendingCommentIssue).comment = { id: parsed.comment_id ?? 0, html_url: parsed.existing_comment_url };
+            pendingCommentIssue = null;
+          }
+          if (pendingBranchIssue && pendingBranchName && parsed.branch_url) {
+            ensureEntry(pendingBranchIssue).branch = { name: pendingBranchName, sha: '' };
+            pendingBranchIssue = null;
+            pendingBranchName = null;
+          }
+          if (pendingPrIssue && parsed.existing_pr_url) {
+            ensureEntry(pendingPrIssue).pr = { number: parsed.pr_number ?? 0, html_url: parsed.existing_pr_url };
+            pendingPrIssue = null;
           }
         }
       } catch {
@@ -216,13 +302,13 @@ export function buildUserMessage(
   let actionContext = '';
   if (issueActions && Object.keys(issueActions).length > 0) {
     const incomplete = Object.entries(issueActions)
-      .filter(([, actions]) => !actions.commented || !actions.branch || actions.pr === null)
-      .map(([num, actions]) => {
+      .filter(([, a]) => !a.comment || !a.branch || a.pr === null)
+      .map(([num, a]) => {
         const done: string[] = [];
         const todo: string[] = [];
-        if (actions.commented) done.push('commented'); else todo.push('comment');
-        if (actions.branch) done.push(`branch: ${actions.branch}`); else todo.push('create branch');
-        if (actions.pr !== null && actions.pr > 0) done.push(`PR #${actions.pr}`); else todo.push('open PR');
+        if (a.comment) done.push('commented'); else todo.push('comment');
+        if (a.branch) done.push(`branch: ${a.branch.name}`); else todo.push('create branch');
+        if (a.pr) done.push(`PR #${a.pr.number}`); else todo.push('open PR');
         return `  Issue #${num}: done=[${done.join(', ')}] remaining=[${todo.join(', ')}]`;
       });
 
@@ -649,11 +735,12 @@ export function showStatus(config: Config): void {
   // Show per-issue action tracking
   if (pollState.issues && Object.keys(pollState.issues).length > 0) {
     console.log('\nPer-issue actions:');
-    for (const [num, actions] of Object.entries(pollState.issues)) {
+    for (const [num, a] of Object.entries(pollState.issues)) {
       const status: string[] = [];
-      status.push(actions.commented ? 'commented' : 'no comment');
-      status.push(actions.branch ? `branch: ${actions.branch}` : 'no branch');
-      status.push(actions.pr !== null ? `PR #${actions.pr}` : 'no PR');
+      status.push(a.comment ? 'commented' : 'no comment');
+      status.push(a.branch ? `branch: ${a.branch.name}` : 'no branch');
+      if (a.commits.length > 0) status.push(`${a.commits.length} commit(s)`);
+      status.push(a.pr ? `PR #${a.pr.number}` : 'no PR');
       console.log(`  #${num}: ${status.join(', ')}`);
     }
   }
