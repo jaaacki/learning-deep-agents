@@ -126,26 +126,27 @@ GitHub ──webhook──► │  [Caddy :443] ──► [Node :3000]  │
 
 ---
 
-## Phase 8 — Reviewer Bot (Separate Project)
+## Phase 8 — Reviewer Bot ✓ (v1.0.0)
 
-> A second bot that reviews PRs created by the analyzer bot. Lives in its own repo.
+> A reviewer agent that reviews PRs created by the analyzer bot. Built into this project.
 
 | # | Issue | Status |
 |---|-------|--------|
-| [#15](../../issues/15) | PR review agent | Open |
-| [#16](../../issues/16) | `submit_pr_review` tool | Open |
+| [#15](../../issues/15) | PR review agent | ✓ v1.0.0 |
+| [#16](../../issues/16) | `submit_pr_review` tool | ✓ v1.0.0 |
 
-**Milestone:** Draft PRs are automatically reviewed. Humans see both the analysis and the review before deciding to merge. The reviewer bot is a separate project with its own deployment.
+**Milestone:** Draft PRs are automatically reviewed via webhook or `deepagents review --pr N`. Reviews are COMMENT-only (hardcoded). Humans see both the analysis and the review before deciding to merge.
 
 **Pipeline:**
 ```
 Issue opened
-  → Analyzer bot (this project)
-      → Comments on issue
-      → Creates draft PR
-          → Reviewer bot (separate project)
-              → Posts PR review
-                  → Human merges (or not)
+  → Triage agent (cheap/fast classification)
+      → Analysis agent (this project)
+          → Comments on issue
+          → Creates draft PR
+              → Reviewer agent (same project)
+                  → Posts PR review (COMMENT only)
+                      → Human merges (or not)
 ```
 
 ---

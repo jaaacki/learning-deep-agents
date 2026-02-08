@@ -242,7 +242,7 @@ pnpm test
 pnpm run test:watch
 ```
 
-246 tests across 9 test files using [vitest](https://vitest.dev/) with mocked external dependencies (Octokit, LLM constructors, filesystem). No real API calls are made during testing.
+257 tests across 9 test files using [vitest](https://vitest.dev/) with mocked external dependencies (Octokit, LLM constructors, filesystem). No real API calls are made during testing.
 
 ## File Structure
 
