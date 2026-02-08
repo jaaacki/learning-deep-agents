@@ -1,6 +1,7 @@
 import { Octokit } from 'octokit';
 import { tool } from 'langchain';
 import { z } from 'zod';
+import { withRetry } from './utils.js';
 
 // ── Circuit breaker ─────────────────────────────────────────────────────────
 
@@ -65,46 +66,24 @@ export function createGitHubClient(token: string) {
 
 /**
  * Tool: Fetch open issues from GitHub repository
- * Accepts a shared Octokit client instead of creating its own.
- * Supports a 'since' parameter for polling (only return issues updated after a given date).
  */
 export function createGitHubIssuesTool(owner: string, repo: string, octokit: Octokit, maxIssues?: number) {
   return tool(
     async ({ state = 'open', limit = 5, since }: { state?: 'open' | 'closed' | 'all'; limit?: number; since?: string }) => {
       try {
-        // Enforce maxIssuesPerRun at the code level so the agent cannot exceed the cap
         const effectiveLimit = maxIssues ? Math.min(limit, maxIssues) : limit;
-
         const sinceLabel = since ? ` updated since ${since}` : '';
         console.log(`\u{1F4E5} Fetching ${state} issues from ${owner}/${repo}${sinceLabel}...`);
-
         const params: Parameters<typeof octokit.rest.issues.listForRepo>[0] = {
-          owner,
-          repo,
-          state,
-          per_page: effectiveLimit,
-          sort: 'updated',
-          direction: 'desc',
+          owner, repo, state, per_page: effectiveLimit, sort: 'updated', direction: 'desc',
         };
-
-        if (since) {
-          params.since = since;
-        }
-
-        const { data: issues } = await octokit.rest.issues.listForRepo(params);
-
-        // Format issues for the agent
+        if (since) { params.since = since; }
+        const { data: issues } = await withRetry(() => octokit.rest.issues.listForRepo(params));
         const formattedIssues = issues.map((issue) => ({
-          number: issue.number,
-          title: issue.title,
-          body: issue.body || '(no description)',
-          state: issue.state,
-          created_at: issue.created_at,
-          updated_at: issue.updated_at,
-          url: issue.html_url,
-          labels: issue.labels.map((l) => l.name),
+          number: issue.number, title: issue.title, body: issue.body || '(no description)',
+          state: issue.state, created_at: issue.created_at, updated_at: issue.updated_at,
+          url: issue.html_url, labels: issue.labels.map((l) => l.name),
         }));
-
         return JSON.stringify(formattedIssues, null, 2);
       } catch (error) {
         return `Error fetching issues: ${error}`;
@@ -122,14 +101,6 @@ export function createGitHubIssuesTool(owner: string, repo: string, octokit: Oct
   );
 }
 
-/**
- * Tool: Post a comment on a GitHub issue
- * Uses octokit.rest.issues.createComment() -- works for both issues and PRs.
- */
-/**
- * Hidden HTML marker embedded in bot comments for idempotency detection.
- * GitHub renders HTML comments invisibly, so users never see this.
- */
 const BOT_COMMENT_MARKER = '<!-- deep-agent-analysis -->';
 
 export function createCommentOnIssueTool(owner: string, repo: string, octokit: Octokit) {
@@ -137,42 +108,19 @@ export function createCommentOnIssueTool(owner: string, repo: string, octokit: O
     async ({ issue_number, body }: { issue_number: number; body: string }) => {
       try {
         console.log(`\u{1F4AC} Commenting on issue #${issue_number} in ${owner}/${repo}...`);
-
-        // Idempotency check: see if we already posted an analysis comment
-        const { data: existingComments } = await octokit.rest.issues.listComments({
-          owner,
-          repo,
-          issue_number,
-          per_page: 100,
-        });
-        const alreadyCommented = existingComments.some(
-          (c) => c.body?.includes(BOT_COMMENT_MARKER)
-        );
-
+        const { data: existingComments } = await withRetry(() => octokit.rest.issues.listComments({
+          owner, repo, issue_number, per_page: 100,
+        }));
+        const alreadyCommented = existingComments.some((c) => c.body?.includes(BOT_COMMENT_MARKER));
         if (alreadyCommented) {
           console.log(`\u{26A0}\uFE0F  Skipping comment on issue #${issue_number} -- analysis comment already exists.`);
-          return JSON.stringify({
-            skipped: true,
-            reason: 'Analysis comment already exists on this issue.',
-            issue_number,
-          });
+          return JSON.stringify({ skipped: true, reason: 'Analysis comment already exists on this issue.', issue_number });
         }
-
-        // Include the marker in the comment body (invisible in rendered Markdown)
         const markedBody = `${BOT_COMMENT_MARKER}\n${body}`;
-
-        const { data: comment } = await octokit.rest.issues.createComment({
-          owner,
-          repo,
-          issue_number,
-          body: markedBody,
-        });
-
-        return JSON.stringify({
-          id: comment.id,
-          html_url: comment.html_url,
-          created_at: comment.created_at,
-        });
+        const { data: comment } = await withRetry(() => octokit.rest.issues.createComment({
+          owner, repo, issue_number, body: markedBody,
+        }));
+        return JSON.stringify({ id: comment.id, html_url: comment.html_url, created_at: comment.created_at });
       } catch (error) {
         return `Error commenting on issue #${issue_number}: ${error}`;
       }
@@ -188,60 +136,23 @@ export function createCommentOnIssueTool(owner: string, repo: string, octokit: O
   );
 }
 
-/**
- * Tool: Create a new Git branch in the repository
- * Uses two GitHub API calls:
- *   1. octokit.rest.git.getRef() -- get the SHA of the source branch
- *   2. octokit.rest.git.createRef() -- create a new branch pointing to that SHA
- */
 export function createBranchTool(owner: string, repo: string, octokit: Octokit) {
   return tool(
     async ({ branch_name, from_branch = 'main' }: { branch_name: string; from_branch?: string }) => {
       try {
         console.log(`\u{1F33F} Creating branch '${branch_name}' from '${from_branch}' in ${owner}/${repo}...`);
-
-        // Idempotency check: see if the branch already exists
         try {
-          await octokit.rest.git.getRef({
-            owner,
-            repo,
-            ref: `heads/${branch_name}`,
-          });
-          // If we get here, the branch exists
+          await withRetry(() => octokit.rest.git.getRef({ owner, repo, ref: `heads/${branch_name}` }));
           console.log(`\u{26A0}\uFE0F  Skipping branch creation -- '${branch_name}' already exists.`);
-          return JSON.stringify({
-            skipped: true,
-            reason: `Branch '${branch_name}' already exists.`,
-            branch: branch_name,
-            url: `https://github.com/${owner}/${repo}/tree/${branch_name}`,
-          });
+          return JSON.stringify({ skipped: true, reason: `Branch '${branch_name}' already exists.`, branch: branch_name, url: `https://github.com/${owner}/${repo}/tree/${branch_name}` });
         } catch (e: unknown) {
-          // 404 means the branch does not exist -- this is the expected path
           const status = (e as { status?: number }).status;
           if (status !== 404) throw e;
         }
-
-        // Step 1: Get the SHA of the source branch
-        const { data: ref } = await octokit.rest.git.getRef({
-          owner,
-          repo,
-          ref: `heads/${from_branch}`,
-        });
+        const { data: ref } = await withRetry(() => octokit.rest.git.getRef({ owner, repo, ref: `heads/${from_branch}` }));
         const sha = ref.object.sha;
-
-        // Step 2: Create the new branch pointing to that SHA
-        await octokit.rest.git.createRef({
-          owner,
-          repo,
-          ref: `refs/heads/${branch_name}`,
-          sha,
-        });
-
-        return JSON.stringify({
-          branch: branch_name,
-          sha,
-          url: `https://github.com/${owner}/${repo}/tree/${branch_name}`,
-        });
+        await withRetry(() => octokit.rest.git.createRef({ owner, repo, ref: `refs/heads/${branch_name}`, sha }));
+        return JSON.stringify({ branch: branch_name, sha, url: `https://github.com/${owner}/${repo}/tree/${branch_name}` });
       } catch (error) {
         return `Error creating branch '${branch_name}': ${error}`;
       }
@@ -257,53 +168,23 @@ export function createBranchTool(owner: string, repo: string, octokit: Octokit) 
   );
 }
 
-/**
- * Tool: Open a draft pull request
- * Uses octokit.rest.pulls.create() with draft: true.
- * Always creates a draft -- the agent should never auto-merge.
- */
 export function createPullRequestTool(owner: string, repo: string, octokit: Octokit) {
   return tool(
     async ({ title, body, head, base = 'main' }: { title: string; body: string; head: string; base?: string }) => {
       try {
         console.log(`\u{1F4DD} Creating draft PR '${title}' in ${owner}/${repo}...`);
-
-        // Idempotency check: see if an open PR already exists for this head branch
-        const { data: existingPRs } = await octokit.rest.pulls.list({
-          owner,
-          repo,
-          head: `${owner}:${head}`,
-          base,
-          state: 'open',
-        });
-
+        const { data: existingPRs } = await withRetry(() => octokit.rest.pulls.list({
+          owner, repo, head: `${owner}:${head}`, base, state: 'open',
+        }));
         if (existingPRs.length > 0) {
           const existing = existingPRs[0];
           console.log(`\u{26A0}\uFE0F  Skipping PR creation -- open PR #${existing.number} already exists for branch '${head}'.`);
-          return JSON.stringify({
-            skipped: true,
-            reason: `Open PR #${existing.number} already exists for branch '${head}'.`,
-            number: existing.number,
-            html_url: existing.html_url,
-          });
+          return JSON.stringify({ skipped: true, reason: `Open PR #${existing.number} already exists for branch '${head}'.`, number: existing.number, html_url: existing.html_url });
         }
-
-        const { data: pr } = await octokit.rest.pulls.create({
-          owner,
-          repo,
-          title,
-          body,
-          head,
-          base,
-          draft: true,
-        });
-
-        return JSON.stringify({
-          number: pr.number,
-          html_url: pr.html_url,
-          state: pr.state,
-          draft: pr.draft,
-        });
+        const { data: pr } = await withRetry(() => octokit.rest.pulls.create({
+          owner, repo, title, body, head, base, draft: true,
+        }));
+        return JSON.stringify({ number: pr.number, html_url: pr.html_url, state: pr.state, draft: pr.draft });
       } catch (error) {
         return `Error creating pull request: ${error}`;
       }
@@ -321,63 +202,24 @@ export function createPullRequestTool(owner: string, repo: string, octokit: Octo
   );
 }
 
-/**
- * Tool: List files in the repository
- * Uses three GitHub API calls:
- *   1. octokit.rest.git.getRef() -- get the commit SHA of the branch
- *   2. octokit.rest.git.getCommit() -- get the tree SHA from the commit
- *   3. octokit.rest.git.getTree() -- get the full file tree recursively
- *
- * Returns file paths and sizes. Supports optional path prefix filtering.
- */
 export function createListRepoFilesTool(owner: string, repo: string, octokit: Octokit) {
   return tool(
     async ({ path = '', branch = 'main' }: { path?: string; branch?: string }) => {
       try {
         console.log(`\u{1F4C2} Listing files in ${owner}/${repo}${path ? ` under ${path}` : ''}...`);
-
-        // Step 1: Get the commit SHA of the branch
-        const { data: ref } = await octokit.rest.git.getRef({
-          owner,
-          repo,
-          ref: `heads/${branch}`,
-        });
+        const { data: ref } = await withRetry(() => octokit.rest.git.getRef({ owner, repo, ref: `heads/${branch}` }));
         const commitSha = ref.object.sha;
-
-        // Step 2: Get the tree SHA from the commit
-        const { data: commit } = await octokit.rest.git.getCommit({
-          owner,
-          repo,
-          commit_sha: commitSha,
-        });
+        const { data: commit } = await withRetry(() => octokit.rest.git.getCommit({ owner, repo, commit_sha: commitSha }));
         const treeSha = commit.tree.sha;
-
-        // Step 3: Get the full tree recursively
-        const { data: tree } = await octokit.rest.git.getTree({
-          owner,
-          repo,
-          tree_sha: treeSha,
-          recursive: 'true',
-        });
-
-        // Filter to blobs (files only, not sub-trees) and apply path prefix
+        const { data: tree } = await withRetry(() => octokit.rest.git.getTree({ owner, repo, tree_sha: treeSha, recursive: 'true' }));
         const prefix = path ? (path.endsWith('/') ? path : path + '/') : '';
         const files = tree.tree
           .filter((item) => item.type === 'blob')
           .filter((item) => !prefix || item.path?.startsWith(prefix))
-          .map((item) => ({
-            path: item.path,
-            size: item.size,
-          }));
-
+          .map((item) => ({ path: item.path, size: item.size }));
         if (tree.truncated) {
-          return JSON.stringify({
-            files,
-            warning: 'Tree was truncated by GitHub API (repo has too many files). Results may be incomplete.',
-            total: files.length,
-          }, null, 2);
+          return JSON.stringify({ files, warning: 'Tree was truncated by GitHub API (repo has too many files). Results may be incomplete.', total: files.length }, null, 2);
         }
-
         return JSON.stringify({ files, total: files.length }, null, 2);
       } catch (error) {
         return `Error listing files: ${error}`;
@@ -394,66 +236,33 @@ export function createListRepoFilesTool(owner: string, repo: string, octokit: Oc
   );
 }
 
-/**
- * Tool: Read a single file from the repository
- * Uses octokit.rest.repos.getContent() to fetch file content.
- * GitHub returns base64-encoded content which we decode to UTF-8 text.
- *
- * Note: GitHub's Content API has a 1MB file size limit. For larger files,
- * the API returns a git_url that can be used with the Blobs API instead.
- */
 export function createReadRepoFileTool(owner: string, repo: string, octokit: Octokit) {
   return tool(
     async ({ path, branch = 'main' }: { path: string; branch?: string }) => {
       try {
         console.log(`\u{1F4D6} Reading ${path} from ${owner}/${repo} (${branch})...`);
-
-        const { data } = await octokit.rest.repos.getContent({
-          owner,
-          repo,
-          path,
-          ref: branch,
-        });
-
-        // getContent can return a file, directory, symlink, or submodule.
-        // We only handle files (type === 'file' with content + encoding).
+        const { data } = await withRetry(() => octokit.rest.repos.getContent({ owner, repo, path, ref: branch }));
         if (Array.isArray(data)) {
           return `Error: '${path}' is a directory, not a file. Use list_repo_files to browse directories.`;
         }
-
         if (data.type !== 'file') {
           return `Error: '${path}' is a ${data.type}, not a file.`;
         }
-
         if (!data.content) {
           return `Error: '${path}' has no content (file may be too large for the Content API -- GitHub limit is 1MB).`;
         }
-
-        // Decode base64 content to UTF-8 string
         const fullContent = Buffer.from(data.content, 'base64').toString('utf-8');
-
-        // Truncate files over 500 lines to avoid flooding the LLM context
         const MAX_LINES = 500;
         const lines = fullContent.split('\n');
         const truncated = lines.length > MAX_LINES;
-        const content = truncated
-          ? lines.slice(0, MAX_LINES).join('\n')
-          : fullContent;
-
-        const result: Record<string, unknown> = {
-          path: data.path,
-          size: data.size,
-          sha: data.sha,
-          content,
-        };
-
+        const content = truncated ? lines.slice(0, MAX_LINES).join('\n') : fullContent;
+        const result: Record<string, unknown> = { path: data.path, size: data.size, sha: data.sha, content };
         if (truncated) {
           result.truncated = true;
           result.total_lines = lines.length;
           result.shown_lines = MAX_LINES;
           result.note = `File has ${lines.length} lines. Only the first ${MAX_LINES} are shown. Use list_repo_files to find smaller, more targeted files.`;
         }
-
         return JSON.stringify(result, null, 2);
       } catch (error) {
         return `Error reading file '${path}': ${error}`;
@@ -470,51 +279,24 @@ export function createReadRepoFileTool(owner: string, repo: string, octokit: Oct
   );
 }
 
-/**
- * Tool: Create or update a file on a branch via the GitHub API
- * Uses octokit.rest.repos.createOrUpdateFileContents() to commit a single file.
- * If the file already exists, its current SHA is required (fetched automatically).
- */
 export function createOrUpdateFileTool(owner: string, repo: string, octokit: Octokit) {
   return tool(
     async ({ path, content, message, branch }: { path: string; content: string; message: string; branch: string }) => {
       try {
-        console.log(`📝 Committing ${path} to ${branch} in ${owner}/${repo}...`);
-
-        // Check if file already exists to get its SHA (needed for updates)
+        console.log(`\u{1F4DD} Committing ${path} to ${branch} in ${owner}/${repo}...`);
         let existingSha: string | undefined;
         try {
-          const { data } = await octokit.rest.repos.getContent({
-            owner,
-            repo,
-            path,
-            ref: branch,
-          });
-          if (!Array.isArray(data) && data.type === 'file') {
-            existingSha = data.sha;
-          }
+          const { data } = await withRetry(() => octokit.rest.repos.getContent({ owner, repo, path, ref: branch }));
+          if (!Array.isArray(data) && data.type === 'file') { existingSha = data.sha; }
         } catch (e: unknown) {
           const status = (e as { status?: number }).status;
           if (status !== 404) throw e;
-          // 404 = file doesn't exist yet, that's fine (create mode)
         }
-
-        const { data: result } = await octokit.rest.repos.createOrUpdateFileContents({
-          owner,
-          repo,
-          path,
-          message,
-          content: Buffer.from(content).toString('base64'),
-          branch,
+        const { data: result } = await withRetry(() => octokit.rest.repos.createOrUpdateFileContents({
+          owner, repo, path, message, content: Buffer.from(content).toString('base64'), branch,
           ...(existingSha ? { sha: existingSha } : {}),
-        });
-
-        return JSON.stringify({
-          path,
-          sha: result.content?.sha,
-          commit_sha: result.commit.sha,
-          html_url: result.content?.html_url,
-        });
+        }));
+        return JSON.stringify({ path, sha: result.content?.sha, commit_sha: result.commit.sha, html_url: result.content?.html_url });
       } catch (error) {
         return `Error committing file '${path}': ${error}`;
       }
@@ -533,29 +315,15 @@ export function createOrUpdateFileTool(owner: string, repo: string, octokit: Oct
 }
 
 // ── Dry-run wrappers ────────────────────────────────────────────────────────
-// These create replacement tools with the same name/schema as the real ones
-// but log what they WOULD do and return fake success results.
 
 export function createDryRunCommentTool() {
   return tool(
     async ({ issue_number, body }: { issue_number: number; body: string }) => {
       const preview = body.length > 80 ? body.slice(0, 80) + '...' : body;
       console.log(`DRY RUN -- would comment on issue #${issue_number}: ${preview}`);
-      return JSON.stringify({
-        dry_run: true,
-        id: 0,
-        html_url: `(dry-run) issue #${issue_number} comment`,
-        created_at: new Date().toISOString(),
-      });
+      return JSON.stringify({ dry_run: true, id: 0, html_url: `(dry-run) issue #${issue_number} comment`, created_at: new Date().toISOString() });
     },
-    {
-      name: 'comment_on_issue',
-      description: 'Post a comment on a GitHub issue. (DRY RUN MODE: will log but not execute)',
-      schema: z.object({
-        issue_number: z.number().describe('The issue number to comment on'),
-        body: z.string().describe('The comment body (Markdown supported)'),
-      }),
-    }
+    { name: 'comment_on_issue', description: 'Post a comment on a GitHub issue. (DRY RUN MODE: will log but not execute)', schema: z.object({ issue_number: z.number().describe('The issue number to comment on'), body: z.string().describe('The comment body (Markdown supported)') }) }
   );
 }
 
@@ -563,21 +331,9 @@ export function createDryRunBranchTool() {
   return tool(
     async ({ branch_name, from_branch = 'main' }: { branch_name: string; from_branch?: string }) => {
       console.log(`DRY RUN -- would create branch '${branch_name}' from '${from_branch}'`);
-      return JSON.stringify({
-        dry_run: true,
-        branch: branch_name,
-        sha: '0000000000000000000000000000000000000000',
-        url: `(dry-run) branch ${branch_name}`,
-      });
+      return JSON.stringify({ dry_run: true, branch: branch_name, sha: '0000000000000000000000000000000000000000', url: `(dry-run) branch ${branch_name}` });
     },
-    {
-      name: 'create_branch',
-      description: 'Create a new Git branch in the repository. (DRY RUN MODE: will log but not execute)',
-      schema: z.object({
-        branch_name: z.string().describe('Name for the new branch'),
-        from_branch: z.string().optional().default('main').describe('Branch to create from (default: main)'),
-      }),
-    }
+    { name: 'create_branch', description: 'Create a new Git branch in the repository. (DRY RUN MODE: will log but not execute)', schema: z.object({ branch_name: z.string().describe('Name for the new branch'), from_branch: z.string().optional().default('main').describe('Branch to create from (default: main)') }) }
   );
 }
 
@@ -585,24 +341,9 @@ export function createDryRunPullRequestTool() {
   return tool(
     async ({ title, body, head, base = 'main' }: { title: string; body: string; head: string; base?: string }) => {
       console.log(`DRY RUN -- would create draft PR '${title}' (${head} -> ${base})`);
-      return JSON.stringify({
-        dry_run: true,
-        number: 0,
-        html_url: `(dry-run) PR: ${title}`,
-        state: 'open',
-        draft: true,
-      });
+      return JSON.stringify({ dry_run: true, number: 0, html_url: `(dry-run) PR: ${title}`, state: 'open', draft: true });
     },
-    {
-      name: 'create_pull_request',
-      description: 'Open a draft pull request. (DRY RUN MODE: will log but not execute)',
-      schema: z.object({
-        title: z.string().describe('PR title'),
-        body: z.string().describe('PR description'),
-        head: z.string().describe('The branch containing changes'),
-        base: z.string().optional().default('main').describe('The branch to merge into (default: main)'),
-      }),
-    }
+    { name: 'create_pull_request', description: 'Open a draft pull request. (DRY RUN MODE: will log but not execute)', schema: z.object({ title: z.string().describe('PR title'), body: z.string().describe('PR description'), head: z.string().describe('The branch containing changes'), base: z.string().optional().default('main').describe('The branch to merge into (default: main)') }) }
   );
 }
 
@@ -611,23 +352,8 @@ export function createDryRunCreateOrUpdateFileTool() {
     async ({ path, content, message, branch }: { path: string; content: string; message: string; branch: string }) => {
       const preview = content.length > 80 ? content.slice(0, 80) + '...' : content;
       console.log(`DRY RUN -- would commit ${path} to ${branch}: ${preview}`);
-      return JSON.stringify({
-        dry_run: true,
-        path,
-        sha: '0000000000000000000000000000000000000000',
-        commit_sha: '0000000000000000000000000000000000000000',
-        html_url: `(dry-run) ${path} on ${branch}`,
-      });
+      return JSON.stringify({ dry_run: true, path, sha: '0000000000000000000000000000000000000000', commit_sha: '0000000000000000000000000000000000000000', html_url: `(dry-run) ${path} on ${branch}` });
     },
-    {
-      name: 'create_or_update_file',
-      description: 'Create or update a file on a branch. (DRY RUN MODE: will log but not execute)',
-      schema: z.object({
-        path: z.string().describe('File path in the repo'),
-        content: z.string().describe('The full file content to write'),
-        message: z.string().describe('Git commit message'),
-        branch: z.string().describe('The branch to commit to'),
-      }),
-    }
+    { name: 'create_or_update_file', description: 'Create or update a file on a branch. (DRY RUN MODE: will log but not execute)', schema: z.object({ path: z.string().describe('File path in the repo'), content: z.string().describe('The full file content to write'), message: z.string().describe('Git commit message'), branch: z.string().describe('The branch to commit to') }) }
   );
 }

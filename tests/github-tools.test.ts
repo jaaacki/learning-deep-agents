@@ -142,7 +142,8 @@ describe('createBranchTool (idempotency)', () => {
   });
 
   it('re-throws non-404 errors from existence check', async () => {
-    octokit.rest.git.getRef.mockRejectedValueOnce({ status: 500 });
+    // Use 403 (non-retryable) so withRetry does not retry and cause timeouts
+    octokit.rest.git.getRef.mockRejectedValueOnce({ status: 403 });
 
     const toolFn = createBranchTool('owner', 'repo', octokit);
     const result = await toolFn.invoke({ branch_name: 'issue-3-err' });
