@@ -84,7 +84,7 @@ The bot is now safe for unattended operation. All write operations are idempoten
 ### Added
 - **Test infrastructure** (Issue #23) — vitest setup with unit tests for all modules
 - `vitest` added as dev dependency with `vitest.config.ts`
-- `npm test` runs all tests, `npm run test:watch` for watch mode
+- `pnpm test` runs all tests, `pnpm run test:watch` for watch mode
 - 4 test files covering: `core.ts`, `github-tools.ts`, `model.ts`, `config.ts`
 - Mock patterns: Octokit mock factory, `vi.mock` for LLM constructors, `fs` spies, `process.exit` interception
 - Tests cover: idempotency logic (comment/branch/PR), config validation, provider routing, pure functions, file truncation
@@ -99,8 +99,8 @@ The bot is now safe for unattended operation. All write operations are idempoten
 - `--max-issues N` flag to override config at runtime
 - `--issue N` flag for single-issue analysis (`deepagents analyze --issue 42`)
 - `dry-run` shorthand command (equivalent to `poll --dry-run`)
-- `bin` field in package.json for `npx deepagents` usage
-- `npm run cli` script for development
+- `bin` field in package.json for CLI usage
+- `pnpm run cli` script for development
 
 ### Changed
 - `src/index.ts` is now a thin backwards-compatible wrapper that delegates to `core.ts`

@@ -210,7 +210,15 @@ describe('loadPollState', () => {
     };
     vi.mocked(fs.existsSync).mockReturnValue(true);
     vi.mocked(fs.readFileSync).mockReturnValue(JSON.stringify(state));
-    expect(loadPollState()).toEqual(state);
+    // migratePollState adds issues field to old-format state
+    expect(loadPollState()).toEqual({
+      ...state,
+      issues: {
+        '1': { commented: true, branch: null, pr: null },
+        '2': { commented: true, branch: null, pr: null },
+        '3': { commented: true, branch: null, pr: null },
+      },
+    });
   });
 });
 

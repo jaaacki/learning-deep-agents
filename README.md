@@ -5,7 +5,7 @@ A learning project for understanding Deep Agents / LangGraph patterns. An AI age
 ## What It Does
 
 ```
-cron  -->  poll.sh  -->  npm start  -->  Agent runs
+cron  -->  poll.sh  -->  pnpm start  -->  Agent runs
                                            |
                                            +--> 1. Fetch open issues (since last poll)
                                            +--> 2. List repo files to understand codebase structure
@@ -23,39 +23,33 @@ The project provides a CLI with subcommands:
 
 ```bash
 # Run a poll cycle (fetch + analyze + comment + branch + PR)
-npx deepagents poll
+pnpm run cli poll
 
 # Dry run: skip GitHub writes (comments, branches, PRs) -- safe for testing
-npx deepagents poll --dry-run
+pnpm run cli poll --dry-run
 
 # No-save: run normally but don't persist poll state
-npx deepagents poll --no-save
+pnpm run cli poll --no-save
 
 # Override max issues from config
-npx deepagents poll --max-issues 3
+pnpm run cli poll --max-issues 3
 
 # Analyze a single issue by number
-npx deepagents analyze --issue 42
+pnpm run cli analyze --issue 42
 
 # Show current polling state
-npx deepagents status
+pnpm run cli status
 
 # Show help
-npx deepagents help
+pnpm run cli help
 ```
 
-During development, use `npm run cli` instead of `npx`:
-
-```bash
-npm run cli -- poll --dry-run
-npm run cli -- analyze --issue 42
-```
-
-The original `npm start` still works and runs a single poll cycle (equivalent to `npx deepagents poll`).
+The original `pnpm start` still works and runs a single poll cycle.
 
 ## Prerequisites
 
-- Node.js 18+
+- Node.js 24+
+- [pnpm](https://pnpm.io/) package manager
 - A GitHub account with a [Personal Access Token](https://github.com/settings/tokens) (scopes: `repo`)
 - An Anthropic API key from [console.anthropic.com](https://console.anthropic.com)
 
@@ -66,7 +60,7 @@ The original `npm start` still works and runs a single poll cycle (equivalent to
 ```bash
 git clone https://github.com/jaaacki/learning-deep-agents.git
 cd learning-deep-agents
-npm install
+pnpm install
 ```
 
 ### 2. Create your config
@@ -117,7 +111,7 @@ Edit `config.json`:
 ### 3. Test a single run
 
 ```bash
-npm start
+pnpm start
 ```
 
 You should see output like:
@@ -157,7 +151,7 @@ After the run, check:
 
 ### 4. Test a second run (polling)
 
-Run `npm start` again. This time the agent should skip already-processed issues:
+Run `pnpm start` again. This time the agent should skip already-processed issues:
 
 ```
 📅 Last poll: 2026-02-08T07:30:00.000Z
@@ -208,16 +202,16 @@ Add this line (polls every 15 minutes):
 | `Error creating branch: Not Found` | Make sure the repo has a `main` branch (not `master`) |
 | `Error creating pull request: Validation Failed` | Branch might already exist from a previous run |
 | Agent doesn't comment/create PR | Check console output for API errors; token might lack permissions |
-| `poll.sh: npm: command not found` | Uncomment the correct PATH line in `poll.sh` |
+| `poll.sh: pnpm: command not found` | Uncomment the correct PATH line in `poll.sh` |
 
 ## Testing
 
 ```bash
 # Run all tests
-npm test
+pnpm test
 
 # Run tests in watch mode (re-runs on file changes)
-npm run test:watch
+pnpm run test:watch
 ```
 
 Tests use [vitest](https://vitest.dev/) with mocked external dependencies (Octokit, LLM constructors, filesystem). No real API calls are made during testing.
@@ -255,7 +249,7 @@ To re-analyze all issues from scratch:
 
 ```bash
 rm last_poll.json
-npm start
+pnpm start
 ```
 
 To clean up generated files:

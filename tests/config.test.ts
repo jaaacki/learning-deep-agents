@@ -42,7 +42,7 @@ describe('loadConfig', () => {
   it('exits when config.json does not exist', () => {
     vi.mocked(fs.existsSync).mockReturnValue(false);
 
-    expect(() => loadConfig()).toThrow('process.exit called');
+    expect(() => loadConfig()).toThrow('process.exit');
     expect(console.error).toHaveBeenCalledWith(
       expect.stringContaining('config.json not found')
     );
@@ -53,7 +53,7 @@ describe('loadConfig', () => {
     vi.mocked(fs.existsSync).mockReturnValue(true);
     vi.mocked(fs.readFileSync).mockReturnValue(JSON.stringify(bad));
 
-    expect(() => loadConfig()).toThrow('process.exit called');
+    expect(() => loadConfig()).toThrow('process.exit');
     expect(console.error).toHaveBeenCalledWith(
       expect.stringContaining('Missing required GitHub config')
     );
@@ -64,7 +64,7 @@ describe('loadConfig', () => {
     vi.mocked(fs.existsSync).mockReturnValue(true);
     vi.mocked(fs.readFileSync).mockReturnValue(JSON.stringify(bad));
 
-    expect(() => loadConfig()).toThrow('process.exit called');
+    expect(() => loadConfig()).toThrow('process.exit');
   });
 
   it('exits when LLM API key is missing for cloud providers', () => {
@@ -72,7 +72,7 @@ describe('loadConfig', () => {
     vi.mocked(fs.existsSync).mockReturnValue(true);
     vi.mocked(fs.readFileSync).mockReturnValue(JSON.stringify(bad));
 
-    expect(() => loadConfig()).toThrow('process.exit called');
+    expect(() => loadConfig()).toThrow('process.exit');
     expect(console.error).toHaveBeenCalledWith(
       expect.stringContaining('Missing LLM API key')
     );

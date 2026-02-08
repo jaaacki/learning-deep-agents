@@ -8,7 +8,7 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 cd "$SCRIPT_DIR"
 
-# Ensure node/npm are on PATH when running under cron
+# Ensure node/pnpm are on PATH when running under cron
 # Uncomment the appropriate line for your setup:
 # export PATH="/usr/local/bin:$PATH"                       # Homebrew (Intel Mac)
 # export PATH="/opt/homebrew/bin:$PATH"                    # Homebrew (Apple Silicon)
@@ -29,7 +29,7 @@ trap 'rmdir "$LOCK_DIR"' EXIT
 echo "=== Poll started at $(date -u +"%Y-%m-%dT%H:%M:%SZ") ===" >> "$LOG_FILE"
 
 # Run the agent
-npm start >> "$LOG_FILE" 2>&1
+pnpm start >> "$LOG_FILE" 2>&1
 EXIT_CODE=$?
 
 echo "=== Poll finished at $(date -u +"%Y-%m-%dT%H:%M:%SZ") (exit: $EXIT_CODE) ===" >> "$LOG_FILE"

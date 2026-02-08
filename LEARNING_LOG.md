@@ -45,7 +45,7 @@ src/
 - `config.ts`: "Where are my credentials and which repo am I targeting?"
 - `github-tools.ts`: "What actions can the agent take on GitHub?"
 - `agent.ts`: "How do I assemble the agent from its parts?"
-- `index.ts`: "What happens when you run `npm start`?"
+- `index.ts`: "What happens when you run `pnpm start`?"
 
 ### Key concept: How a tool works
 
@@ -474,7 +474,7 @@ const { data: issues } = await octokit.rest.issues.listForRepo({
 
 **Purpose:** A simple shell script that cron can invoke. It sets up the environment, runs the agent, and logs output.
 
-**Why a shell script and not just `npm start` in cron?** Cron runs with a minimal environment -- it does not load your shell profile, so `node` and `npm` might not be on the PATH. The script ensures the right Node.js version is available and the working directory is correct.
+**Why a shell script and not just `pnpm start` in cron?** Cron runs with a minimal environment -- it does not load your shell profile, so `node` and `pnpm` might not be on the PATH. The script ensures the right Node.js version is available and the working directory is correct.
 
 ```bash
 #!/usr/bin/env bash
@@ -493,7 +493,7 @@ LOG_FILE="./poll.log"
 echo "=== Poll started at $(date -u +"%Y-%m-%dT%H:%M:%SZ") ===" >> "$LOG_FILE"
 
 # Run the agent
-npm start >> "$LOG_FILE" 2>&1
+pnpm start >> "$LOG_FILE" 2>&1
 EXIT_CODE=$?
 
 echo "=== Poll finished at $(date -u +"%Y-%m-%dT%H:%M:%SZ") (exit: $EXIT_CODE) ===" >> "$LOG_FILE"
@@ -506,7 +506,7 @@ exit $EXIT_CODE
 - `set -euo pipefail` -- Exit on any error, treat unset variables as errors, and propagate failures through pipes. This is defensive scripting.
 - `SCRIPT_DIR` -- Resolves the script's own directory, so the script works regardless of where cron runs it from.
 - `LOG_FILE` -- Appends output to `poll.log` so you can debug without looking at cron mail.
-- We capture `npm start`'s exit code and pass it through, so cron knows if the run failed.
+- We capture `pnpm start`'s exit code and pass it through, so cron knows if the run failed.
 
 ### Updated system prompt design
 
@@ -573,7 +573,7 @@ Cron (every 15 min)
 poll.sh
   |
   v
-npm start -> src/index.ts
+pnpm start -> src/index.ts
   |
   |-- loadConfig()           -> config.json
   |-- loadPollState()        -> last_poll.json (or null if first run)
@@ -696,26 +696,26 @@ const defaultBranch = repo.default_branch; // "main", "master", etc.
 
 **Recommendation:** This is already well-handled. The existing pattern is good. One enhancement: the tools could distinguish between recoverable errors (e.g., "branch already exists" -- just skip and continue) and fatal errors (e.g., "invalid token" -- stop processing entirely). But for a learning project, the simple string return is fine.
 
-### Assumption 6: `poll.sh` will find `npm` on the PATH
+### Assumption 6: `poll.sh` will find `pnpm` on the PATH
 
-**Where this appears:** The `poll.sh` script calls `npm start`.
+**Where this appears:** The `poll.sh` script calls `pnpm start`.
 
-**What could go wrong:** Cron uses a minimal environment. On macOS, `npm` installed via Homebrew or nvm might not be on cron's PATH. The script will fail with "npm: command not found."
+**What could go wrong:** Cron uses a minimal environment. On macOS, `pnpm` installed via Homebrew or nvm might not be on cron's PATH. The script will fail with "pnpm: command not found."
 
 **Learning moment:** This is one of the most common cron debugging issues. It catches everyone at least once.
 
 **Recommendation:** Add a PATH setup line to `poll.sh`:
 
 ```bash
-# If using nvm, source it so node/npm are available
+# If using nvm, source it so node/pnpm are available
 export NVM_DIR="$HOME/.nvm"
 [ -s "$NVM_DIR/nvm.sh" ] && . "$NVM_DIR/nvm.sh"
 ```
 
-Or hardcode the path to npm:
+Or hardcode the path to pnpm:
 
 ```bash
-/usr/local/bin/npm start >> "$LOG_FILE" 2>&1
+/usr/local/bin/pnpm start >> "$LOG_FILE" 2>&1
 ```
 
 ### Assumption 7: The `issues/` directory exists before `write_file` is called
@@ -752,7 +752,7 @@ This is a one-liner that prevents a class of "it works on my machine" issues.
 | Agent not following prompt order | Low-Medium | Test and observe; prompt is well-structured |
 | Polling timing edge cases | Low | Accept; belt-and-suspenders approach mitigates |
 | Tool error escaping try/catch | Low | Existing `main().catch()` handles it |
-| npm not on cron PATH | Medium | Add PATH setup to `poll.sh` |
+| pnpm not on cron PATH | Medium | Add PATH setup to `poll.sh` |
 | Missing `issues/` directory | Medium | Add `mkdirSync` in `index.ts` |
 | Growing issue numbers array | Very Low | Accept for learning project |
 
@@ -834,7 +834,7 @@ for (const msg of result.messages) {
 
 ### poll.sh and the cron PATH problem
 
-`poll.sh` is a thin wrapper: it `cd`s to the project directory, runs `npm start`, and logs output. The Entry 3 critic flagged that cron's minimal PATH might not include `npm`. We added commented-out PATH setup lines for common Node.js installations (Homebrew Intel, Homebrew Apple Silicon, nvm). Users uncomment the one that matches their setup.
+`poll.sh` is a thin wrapper: it `cd`s to the project directory, runs `pnpm start`, and logs output. The Entry 3 critic flagged that cron's minimal PATH might not include `pnpm`. We added commented-out PATH setup lines for common Node.js installations (Homebrew Intel, Homebrew Apple Silicon, nvm). Users uncomment the one that matches their setup.
 
 ### The `issues/` directory problem
 
@@ -995,7 +995,7 @@ The Builder addressed every recommendation from Entry 3. Good. Now let us look a
 **File:** `src/config.ts:7` -- `const configPath = './config.json';`
 **Also:** `src/index.ts:15` -- `path.resolve('./last_poll.json')` and `src/index.ts:33` -- `fs.mkdirSync('./issues', ...)`
 
-**What could go wrong?** The `./` prefix resolves against the *current working directory* of the Node.js process, not the directory where the source file lives. `poll.sh` does `cd "$SCRIPT_DIR"` to work around this, but it creates an undocumented runtime requirement. If anyone runs `npm start` from a different directory (common during development: `cd ~ && node ~/Dev/deepagents/src/index.ts`), three things silently break: config loading, poll state, and issue file writes.
+**What could go wrong?** The `./` prefix resolves against the *current working directory* of the Node.js process, not the directory where the source file lives. `poll.sh` does `cd "$SCRIPT_DIR"` to work around this, but it creates an undocumented runtime requirement. If anyone runs `pnpm start` from a different directory (common during development: `cd ~ && node ~/Dev/deepagents/src/index.ts`), three things silently break: config loading, poll state, and issue file writes.
 
 **Why this was missed:** Entry 3 did not review the existing code in `config.ts` -- it focused on the new designs in Entry 2.
 
@@ -1268,14 +1268,14 @@ Entry 4 acknowledges this challenge ("The trickiest part was figuring out which 
 
 **File:** `poll.sh:5` and `poll.sh:24`
 
-**What could go wrong?** `set -e` causes the script to exit immediately on any command failure. On line 23, `npm start >> "$LOG_FILE" 2>&1` runs the agent. If it fails (non-zero exit), `set -e` would terminate the script immediately -- but line 24 tries to capture `$?`. In bash, `set -e` does *not* trigger on the line before `$?` is captured, so this actually works. However, it is a subtle behavior that confuses many developers.
+**What could go wrong?** `set -e` causes the script to exit immediately on any command failure. On line 23, `pnpm start >> "$LOG_FILE" 2>&1` runs the agent. If it fails (non-zero exit), `set -e` would terminate the script immediately -- but line 24 tries to capture `$?`. In bash, `set -e` does *not* trigger on the line before `$?` is captured, so this actually works. However, it is a subtle behavior that confuses many developers.
 
 The real issue: if the `echo` on line 20 fails (e.g., disk full, `$LOG_FILE` path invalid), the script exits silently before running the agent, and the cron entry shows no output. With `set -e`, debugging "why did the poll not run?" is harder because there is no error message.
 
 **What you will learn:** `set -e` is a blunt instrument. It is good practice for simple scripts, but for scripts with error handling logic, it can mask problems. An alternative is to use explicit error checks on critical commands:
 
 ```bash
-npm start >> "$LOG_FILE" 2>&1 || EXIT_CODE=$?
+pnpm start >> "$LOG_FILE" 2>&1 || EXIT_CODE=$?
 ```
 
 For this learning project, the current `set -euo pipefail` is fine. Just know that it has these edge cases.
@@ -2124,7 +2124,7 @@ An operation is **idempotent** if performing it multiple times produces the same
 For an agent running on a cron schedule, idempotency is critical because:
 1. **Crash recovery:** If the agent crashes after commenting but before saving poll state, the next run re-processes the same issue. Without idempotency, the issue gets a duplicate comment.
 2. **Cron overlap:** If a run takes longer than the cron interval, two runs process the same issues simultaneously (Entry 7, Finding #6).
-3. **Manual re-runs:** A developer running `npm start` twice for debugging should not cause duplicate side effects.
+3. **Manual re-runs:** A developer running `pnpm start` twice for debugging should not cause duplicate side effects.
 
 ### Three different idempotency patterns
 
@@ -2620,17 +2620,17 @@ The CLI also adds a `dry-run` shorthand command -- `deepagents dry-run` is equiv
 ### The `bin` field and `npx`
 
 Adding `"bin": { "deepagents": "./src/cli.ts" }` to `package.json` means:
-- After `npm link`, you can run `deepagents poll` from anywhere
+- After `pnpm link`, you can run `deepagents poll` from anywhere
 - With `npx`, you can run `npx deepagents poll` without global install
 - The shebang (`#!/usr/bin/env node`) tells the OS to use Node.js
 
-In practice, during development you use `npm run cli -- poll --dry-run` (the `--` separates npm's flags from the script's flags). The `npx` form is for when the package is installed.
+In practice, during development you use `pnpm run cli -- poll --dry-run` (the `--` separates pnpm's flags from the script's flags).
 
 ### Backwards compatibility
 
 `src/index.ts` is now 20 lines. It imports `loadConfig` and `runPollCycle` from `core.ts` and calls them. This means:
-- `npm start` still works exactly as before
-- `npm run dev` (watch mode) still works
+- `pnpm start` still works exactly as before
+- `pnpm dev` (watch mode) still works
 - No existing workflow is broken
 - The new CLI is additive, not a replacement
 
@@ -2834,14 +2834,14 @@ The separation of concerns between `cli.ts`, `core.ts`, and `index.ts` is clean:
 
 **What happens:** The `bin` field points to `./src/cli.ts`, a TypeScript file. When a user runs `npx deepagents poll`, Node.js attempts to execute the `.ts` file directly. This works if `tsx` is available, but will fail with a syntax error if the user only has standard Node.js.
 
-**Why this happens:** The project uses `tsx` as a dev dependency for running TypeScript directly. During development, `npm run cli` works because it uses `tsx`. But `npx deepagents` invokes the file directly with `node`, which does not understand TypeScript.
+**Why this happens:** The project uses `tsx` as a dev dependency for running TypeScript directly. During development, `pnpm run cli` works because it uses `tsx`. But `npx deepagents` invokes the file directly with `node`, which does not understand TypeScript.
 
 **The fix options:**
 1. **Add a build step** that compiles `cli.ts` to `dist/cli.js` and point `bin` there. This is the production approach but adds complexity.
 2. **Add a shell wrapper** that invokes `tsx src/cli.ts`. This is hacky but works for a learning project.
-3. **Document that `npm run cli` is the supported interface.** The `bin` field is forward-looking for when a build step exists.
+3. **Document that `pnpm run cli` is the supported interface.** The `bin` field is forward-looking for when a build step exists.
 
-**For a learning project:** Option 3 is fine. But the README and CHANGELOG mention `npx deepagents` usage, which would fail. Either fix the bin field or update the docs to use `npm run cli`.
+**For a learning project:** Option 3 is fine. But the README and CHANGELOG mention `npx deepagents` usage, which would fail. Either fix the bin field or update the docs to use `pnpm run cli`.
 
 **Impact:** Medium -- documented feature does not work as advertised.
 **Effort:** Small -- either fix bin or update docs.
@@ -3037,7 +3037,7 @@ The team lead asked me to check this. The previous CHANGELOG had two `## v0.1.1`
 **What the team did well:**
 - The `core.ts` extraction is textbook separation of concerns. Every function in `core.ts` is independently testable. The Extract-Wrap pattern is explained clearly in Entry 15.
 - The test suite is genuinely useful. The `getMaxIssues` tests (8 edge cases) and idempotency tests (skip + proceed + error paths) catch real bugs. The `process.exit` interception pattern is clever and well-documented.
-- Backwards compatibility is preserved. `npm start` still works. No existing workflow is broken.
+- Backwards compatibility is preserved. `pnpm start` still works. No existing workflow is broken.
 - The CLI is pragmatic -- no unnecessary framework dependencies. Manual parsing for 4 commands and 3 flags is the right call.
 - The mock Octokit factory (`createMockOctokit`) is reusable and clean, leveraging the dependency injection pattern from Phase 0.
 - Entry 16's comparison of three mock strategies (factory, vi.mock, vi.spyOn) is excellent teaching material.
