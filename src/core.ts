@@ -3,6 +3,7 @@ import path from 'path';
 import type { Config } from './config.js';
 import { createDeepAgentWithGitHub } from './agent.js';
 import { CircuitBreakerError, createGitHubClient } from './github-tools.js';
+import { withRetry } from './utils.js';
 import { runTriage } from './triage-agent.js';
 import type { TriageOutput } from './triage-agent.js';
 
@@ -775,4 +776,105 @@ export function showStatus(config: Config): void {
   const maxToolCalls = getMaxToolCalls(config);
   console.log(`\nMax issues per run: ${maxIssues}`);
   console.log(`Max tool calls per run: ${maxToolCalls}`);
+}
+
+/**
+ * Result of a retraction operation. Reports what was retracted and what failed.
+ */
+export interface RetractResult {
+  issueNumber: number;
+  prClosed: boolean;
+  branchDeleted: boolean;
+  commentDeleted: boolean;
+  errors: string[];
+}
+
+/**
+ * Retract all actions taken on a specific issue: close PR, delete branch, delete comment.
+ * Order matters: close PR first (it references the branch), then delete branch, then delete comment.
+ * Partial retraction is supported -- if one step fails, the others still attempt.
+ */
+export async function retractIssue(config: Config, issueNumber: number): Promise<RetractResult> {
+  const { owner, repo, token } = config.github;
+  const octokit = createGitHubClient(token);
+
+  const pollState = loadPollState();
+  if (!pollState) {
+    throw new Error('No poll state found. Nothing to retract.');
+  }
+
+  const actions = pollState.issues?.[String(issueNumber)];
+  if (!actions) {
+    throw new Error(`No actions recorded for issue #${issueNumber}. Nothing to retract.`);
+  }
+
+  const result: RetractResult = {
+    issueNumber,
+    prClosed: false,
+    branchDeleted: false,
+    commentDeleted: false,
+    errors: [],
+  };
+
+  // Step 1: Close PR (must happen before branch deletion)
+  if (actions.pr && actions.pr.number > 0) {
+    try {
+      await withRetry(() => octokit.rest.pulls.update({
+        owner,
+        repo,
+        pull_number: actions.pr!.number,
+        state: 'closed',
+      }));
+      result.prClosed = true;
+      console.log(`  Closed PR #${actions.pr.number}`);
+    } catch (error) {
+      const msg = `Failed to close PR #${actions.pr.number}: ${error}`;
+      result.errors.push(msg);
+      console.error(`  ${msg}`);
+    }
+  }
+
+  // Step 2: Delete branch
+  if (actions.branch && actions.branch.name) {
+    try {
+      await withRetry(() => octokit.rest.git.deleteRef({
+        owner,
+        repo,
+        ref: `heads/${actions.branch!.name}`,
+      }));
+      result.branchDeleted = true;
+      console.log(`  Deleted branch ${actions.branch.name}`);
+    } catch (error) {
+      const msg = `Failed to delete branch ${actions.branch.name}: ${error}`;
+      result.errors.push(msg);
+      console.error(`  ${msg}`);
+    }
+  }
+
+  // Step 3: Delete comment
+  if (actions.comment && actions.comment.id > 0) {
+    try {
+      await withRetry(() => octokit.rest.issues.deleteComment({
+        owner,
+        repo,
+        comment_id: actions.comment!.id,
+      }));
+      result.commentDeleted = true;
+      console.log(`  Deleted comment ${actions.comment.id}`);
+    } catch (error) {
+      const msg = `Failed to delete comment ${actions.comment.id}: ${error}`;
+      result.errors.push(msg);
+      console.error(`  ${msg}`);
+    }
+  }
+
+  // Update poll state: remove the issue's actions and issue number
+  delete pollState.issues![String(issueNumber)];
+  pollState.lastPollIssueNumbers = pollState.lastPollIssueNumbers.filter(
+    (n) => n !== issueNumber,
+  );
+  savePollState(pollState);
+  console.log(`  Poll state updated (issue #${issueNumber} cleared)`);
+
+  return result;
 }

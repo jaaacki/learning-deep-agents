@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 
 import { loadConfig } from './config.js';
-import { runPollCycle, runAnalyzeSingle, runTriageSingle, showStatus, requestShutdown } from './core.js';
+import { runPollCycle, runAnalyzeSingle, runTriageSingle, showStatus, retractIssue, requestShutdown } from './core.js';
 import { startWebhookServer } from './listener.js';
 
 // ── Signal handlers for graceful shutdown ────────────────────────────────────
@@ -34,6 +34,7 @@ Commands:
   poll              Run a poll cycle: fetch, analyze, comment, branch, PR
   analyze           Analyze a single issue by number
   triage            Run triage on a single issue (classify without side effects)
+  retract           Undo agent actions on an issue (close PR, delete branch, delete comment)
   webhook           Start the HTTP webhook listener for GitHub events
   status            Show current polling state
   help              Show this help message
@@ -50,6 +51,9 @@ Options for 'analyze':
 Options for 'triage':
   --issue N         Issue number to triage (required)
 
+Options for 'retract':
+  --issue N         Issue number to retract (required)
+
 Examples:
   deepagents poll
   deepagents poll --dry-run
@@ -57,6 +61,7 @@ Examples:
   deepagents poll --max-issues 3
   deepagents analyze --issue 42
   deepagents triage --issue 42
+  deepagents retract --issue 42
   deepagents webhook
   deepagents status
 `.trim();
@@ -159,6 +164,38 @@ async function main() {
 
       console.log('\u{1F916} Deep Agents Triage\n');
       await runTriageSingle(config, triageIssueNumber);
+      break;
+    }
+
+    case 'retract': {
+      const retractIssueStr = flags['issue'];
+      if (!retractIssueStr || typeof retractIssueStr !== 'string') {
+        console.error('--issue N is required for the retract command');
+        console.log('\nUsage: deepagents retract --issue 42');
+        process.exit(1);
+      }
+
+      const retractIssueNumber = parseInt(retractIssueStr, 10);
+      if (isNaN(retractIssueNumber) || retractIssueNumber < 1) {
+        console.error('--issue must be a positive integer');
+        process.exit(1);
+      }
+
+      console.log('\u{1F916} Deep Agents Retract\n');
+      console.log(`Retracting actions for issue #${retractIssueNumber}...\n`);
+
+      const retractResult = await retractIssue(config, retractIssueNumber);
+
+      console.log('\nRetraction summary:');
+      console.log(`  PR closed:       ${retractResult.prClosed ? 'yes' : 'no'}`);
+      console.log(`  Branch deleted:   ${retractResult.branchDeleted ? 'yes' : 'no'}`);
+      console.log(`  Comment deleted:  ${retractResult.commentDeleted ? 'yes' : 'no'}`);
+      if (retractResult.errors.length > 0) {
+        console.log(`  Errors:          ${retractResult.errors.length}`);
+        for (const err of retractResult.errors) {
+          console.log(`    - ${err}`);
+        }
+      }
       break;
     }
 

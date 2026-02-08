@@ -5125,6 +5125,50 @@ The prompt says "if triage context is provided" rather than assuming it always e
 
 ---
 
+## Entry 38: Retract Command Implementation
+
+**Date:** 2026-02-08
+**Author:** Builder Agent
+**Issue:** #32
+
+### What was built
+
+The `deepagents retract --issue N` CLI command undoes all actions the agent previously took on a GitHub issue. It uses the enriched metadata from v0.3.7 (#31) to find the exact PR number, branch name, and comment ID, then calls GitHub's API to close/delete each one.
+
+### Design decisions
+
+**1. Ordering: PR first, then branch, then comment.**
+
+The PR references the branch. If we delete the branch first, GitHub may behave unexpectedly when we try to close the PR (the branch it points to is gone). Closing the PR first is cleanest -- GitHub marks it as closed, then we can safely delete the branch. The comment is independent and goes last.
+
+**2. Partial retraction over all-or-nothing.**
+
+If closing the PR fails (e.g., it was already closed manually), we still try to delete the branch and comment. The `RetractResult` reports what succeeded and what failed, along with error messages. This is more useful than aborting on the first failure -- the operator can see exactly what state was left behind.
+
+**3. No new GitHub tools in github-tools.ts.**
+
+The retract function uses Octokit directly (via `createGitHubClient`) rather than creating new LangChain tools. Why? The retract operation is a CLI-driven, human-invoked command -- the LLM agent never calls it. LangChain tool wrappers (with Zod schemas and descriptions) exist so the agent can discover and call them. Retract has no agent-facing surface, so wrapping it as a tool would be unnecessary ceremony.
+
+**4. Skipping zero/empty IDs.**
+
+Old poll state (migrated from pre-v0.3.7 format) has placeholder values: `comment.id = 0`, `pr.number = 0`. These mean "we know a comment/PR existed but we don't have the real ID." Trying to delete comment ID 0 or close PR #0 would hit GitHub's API with invalid requests. The retract function checks for these sentinel values and skips them.
+
+**5. Clearing poll state after retraction.**
+
+After retraction, the issue is removed from both `pollState.issues` (action tracking) and `pollState.lastPollIssueNumbers` (processed list). This means the next poll run will pick up the issue again if it's still open -- which is exactly the right behavior for "undo and redo."
+
+### Testing approach
+
+Seven tests cover the key scenarios: full retraction (all 3 actions), no poll state, missing issue in state, partial retraction (PR only, comment only), error recovery (PR close fails but branch and comment still succeed), and migrated-format safety (zero IDs are skipped). The mock pattern uses `vi.mock` to intercept `createGitHubClient` from `github-tools.ts`, which is a new pattern in this codebase -- previous tests mocked Octokit directly because tools accepted it as a parameter.
+
+### What the Critic should check
+
+1. Should retraction also delete the local `./issues/issue_N.md` file? Currently it only retracts GitHub-side artifacts. The local file is left behind.
+2. The `withRetry()` wrapper retries on 5xx/429 errors. For delete operations, is retrying safe? (Yes -- deletes are idempotent, and GitHub returns 404 for already-deleted resources, which `withRetry` does not retry on.)
+3. Should there be a `--dry-run` flag for retract? Currently there is no dry-run mode for retraction.
+
+---
+
 ## Entry 39: Critic's Batch 2 Review -- PR #41 (Issue #4) and PR #40 (Issue #32)
 
 **Date:** 2026-02-08

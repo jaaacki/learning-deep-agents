@@ -69,7 +69,7 @@ An autonomous bot that watches a GitHub repository, analyzes new issues with AI,
 
 ---
 
-## Phase 5 — Resilience
+## Phase 5 — Resilience ✓ (v0.5.0)
 
 > The bot recovers from failures and handles load gracefully. Actions can be undone.
 
@@ -78,7 +78,7 @@ An autonomous bot that watches a GitHub repository, analyzes new issues with AI,
 | [#17](../../issues/17) | Error handling with retry and backoff | ✓ v0.3.4 |
 | [#22](../../issues/22) | Graceful shutdown (SIGTERM handling) | ✓ v0.3.6 |
 | [#31](../../issues/31) | Enrich action tracking with full response metadata | ✓ v0.3.7 |
-| [#32](../../issues/32) | Retract command (`deepagents retract --issue N`) | Open |
+| [#32](../../issues/32) | Retract command (`deepagents retract --issue N`) | ✓ v0.5.0 |
 | [#33](../../issues/33) | Structured logging (tool calls, timing, workflow steps) | ✓ v0.3.3 |
 
 **Milestone:** Transient API failures are retried. Container stops don't lose work. Agent actions can be retracted by humans via CLI. Tool calls are logged with arguments and timing.

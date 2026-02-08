@@ -10,12 +10,22 @@ import {
   getMaxIssues,
   getMaxToolCalls,
   migratePollState,
+  retractIssue,
   requestShutdown,
   isShuttingDown,
   resetShutdown,
 } from '../src/core.js';
-import type { IssueActions, PollState } from '../src/core.js';
+import type { IssueActions, RetractResult, PollState } from '../src/core.js';
 import type { TriageOutput } from '../src/triage-agent.js';
+import { createGitHubClient } from '../src/github-tools.js';
+
+vi.mock('../src/github-tools.js', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('../src/github-tools.js')>();
+  return {
+    ...actual,
+    createGitHubClient: vi.fn(),
+  };
+});
 
 // ── getMaxIssues ──────────────────────────────────────────────────────────────
 
@@ -546,6 +556,169 @@ describe('graceful shutdown', () => {
     expect(isShuttingDown()).toBe(true);
     resetShutdown();
     expect(isShuttingDown()).toBe(false);
+  });
+});
+
+// ── retractIssue ──────────────────────────────────────────────────────────────
+
+describe('retractIssue', () => {
+  let mockOctokit: any;
+
+  function makePollState(issueNum: number, actions: IssueActions) {
+    return {
+      lastPollTimestamp: '2026-01-01T00:00:00Z',
+      lastPollIssueNumbers: [issueNum],
+      issues: { [String(issueNum)]: actions },
+    };
+  }
+
+  beforeEach(() => {
+    mockOctokit = {
+      rest: {
+        pulls: { update: vi.fn().mockResolvedValue({ data: {} }) },
+        git: { deleteRef: vi.fn().mockResolvedValue({ data: {} }) },
+        issues: { deleteComment: vi.fn().mockResolvedValue({ data: {} }) },
+      },
+    };
+    vi.mocked(createGitHubClient).mockReturnValue(mockOctokit as any);
+    vi.spyOn(fs, 'existsSync').mockReturnValue(true);
+    vi.spyOn(fs, 'writeFileSync').mockImplementation(() => {});
+  });
+
+  afterEach(() => {
+    vi.restoreAllMocks();
+  });
+
+  it('closes PR, deletes branch, and deletes comment for a fully-tracked issue', async () => {
+    const actions: IssueActions = {
+      comment: { id: 100, html_url: 'https://c' },
+      branch: { name: 'issue-42-fix', sha: 'abc' },
+      commits: [{ path: 'f.ts', sha: 'fs', commit_sha: 'cs' }],
+      pr: { number: 10, html_url: 'https://pr' },
+    };
+    vi.spyOn(fs, 'readFileSync').mockReturnValue(JSON.stringify(makePollState(42, actions)));
+
+    const config = { github: { owner: 'o', repo: 'r', token: 't' } } as any;
+    const result = await retractIssue(config, 42);
+
+    expect(result.prClosed).toBe(true);
+    expect(result.branchDeleted).toBe(true);
+    expect(result.commentDeleted).toBe(true);
+    expect(result.errors).toHaveLength(0);
+
+    expect(mockOctokit.rest.pulls.update).toHaveBeenCalledWith({
+      owner: 'o', repo: 'r', pull_number: 10, state: 'closed',
+    });
+    expect(mockOctokit.rest.git.deleteRef).toHaveBeenCalledWith({
+      owner: 'o', repo: 'r', ref: 'heads/issue-42-fix',
+    });
+    expect(mockOctokit.rest.issues.deleteComment).toHaveBeenCalledWith({
+      owner: 'o', repo: 'r', comment_id: 100,
+    });
+
+    // Verify poll state was saved with the issue removed
+    const savedState = JSON.parse((vi.mocked(fs.writeFileSync).mock.calls[0][1] as string));
+    expect(savedState.issues['42']).toBeUndefined();
+    expect(savedState.lastPollIssueNumbers).not.toContain(42);
+  });
+
+  it('throws when no poll state exists', async () => {
+    vi.spyOn(fs, 'existsSync').mockReturnValue(false);
+    const config = { github: { owner: 'o', repo: 'r', token: 't' } } as any;
+    await expect(retractIssue(config, 42)).rejects.toThrow('No poll state found');
+  });
+
+  it('throws when issue has no recorded actions', async () => {
+    const state = {
+      lastPollTimestamp: '2026-01-01T00:00:00Z',
+      lastPollIssueNumbers: [1],
+      issues: { '1': { comment: null, branch: null, commits: [], pr: null } },
+    };
+    vi.spyOn(fs, 'readFileSync').mockReturnValue(JSON.stringify(state));
+
+    const config = { github: { owner: 'o', repo: 'r', token: 't' } } as any;
+    await expect(retractIssue(config, 99)).rejects.toThrow('No actions recorded for issue #99');
+  });
+
+  it('handles partial retraction when only a PR exists (no branch, no comment)', async () => {
+    const actions: IssueActions = {
+      comment: null,
+      branch: null,
+      commits: [],
+      pr: { number: 5, html_url: 'https://pr' },
+    };
+    vi.spyOn(fs, 'readFileSync').mockReturnValue(JSON.stringify(makePollState(7, actions)));
+
+    const config = { github: { owner: 'o', repo: 'r', token: 't' } } as any;
+    const result = await retractIssue(config, 7);
+
+    expect(result.prClosed).toBe(true);
+    expect(result.branchDeleted).toBe(false);
+    expect(result.commentDeleted).toBe(false);
+    expect(result.errors).toHaveLength(0);
+
+    expect(mockOctokit.rest.git.deleteRef).not.toHaveBeenCalled();
+    expect(mockOctokit.rest.issues.deleteComment).not.toHaveBeenCalled();
+  });
+
+  it('handles partial retraction when only a comment exists', async () => {
+    const actions: IssueActions = {
+      comment: { id: 200, html_url: 'https://c' },
+      branch: null,
+      commits: [],
+      pr: null,
+    };
+    vi.spyOn(fs, 'readFileSync').mockReturnValue(JSON.stringify(makePollState(3, actions)));
+
+    const config = { github: { owner: 'o', repo: 'r', token: 't' } } as any;
+    const result = await retractIssue(config, 3);
+
+    expect(result.prClosed).toBe(false);
+    expect(result.branchDeleted).toBe(false);
+    expect(result.commentDeleted).toBe(true);
+    expect(result.errors).toHaveLength(0);
+  });
+
+  it('reports errors but continues retraction when PR close fails', async () => {
+    const actions: IssueActions = {
+      comment: { id: 100, html_url: 'https://c' },
+      branch: { name: 'issue-5-fix', sha: 'abc' },
+      commits: [],
+      pr: { number: 10, html_url: 'https://pr' },
+    };
+    vi.spyOn(fs, 'readFileSync').mockReturnValue(JSON.stringify(makePollState(5, actions)));
+    mockOctokit.rest.pulls.update.mockRejectedValue(new Error('PR not found'));
+
+    const config = { github: { owner: 'o', repo: 'r', token: 't' } } as any;
+    const result = await retractIssue(config, 5);
+
+    expect(result.prClosed).toBe(false);
+    expect(result.branchDeleted).toBe(true);
+    expect(result.commentDeleted).toBe(true);
+    expect(result.errors).toHaveLength(1);
+    expect(result.errors[0]).toContain('Failed to close PR');
+  });
+
+  it('skips actions with zero/empty IDs (migrated from old format)', async () => {
+    const actions: IssueActions = {
+      comment: { id: 0, html_url: '' },
+      branch: { name: 'issue-1-fix', sha: '' },
+      commits: [],
+      pr: { number: 0, html_url: '' },
+    };
+    vi.spyOn(fs, 'readFileSync').mockReturnValue(JSON.stringify(makePollState(1, actions)));
+
+    const config = { github: { owner: 'o', repo: 'r', token: 't' } } as any;
+    const result = await retractIssue(config, 1);
+
+    // PR with number 0 should be skipped
+    expect(result.prClosed).toBe(false);
+    expect(mockOctokit.rest.pulls.update).not.toHaveBeenCalled();
+    // Branch with name should still be deleted (name is meaningful even without SHA)
+    expect(result.branchDeleted).toBe(true);
+    // Comment with id 0 should be skipped
+    expect(result.commentDeleted).toBe(false);
+    expect(mockOctokit.rest.issues.deleteComment).not.toHaveBeenCalled();
   });
 });
 

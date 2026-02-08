@@ -9,6 +9,23 @@
 
 ---
 
+## v0.5.0 — 2026-02-08
+
+**Milestone: Phase 5 (Resilience) complete.** Transient API failures are retried. Container stops don't lose work. Agent actions can be retracted by humans via CLI. Tool calls are logged with arguments and timing.
+
+### Added
+- **Retract command** (Issue #32) — `deepagents retract --issue N` undoes all agent actions on an issue
+- `retractIssue()` function in `src/core.ts`: closes PR, deletes branch, deletes comment (in that order)
+- Uses enriched metadata from v0.3.7 (#31) to find PR numbers, branch names, and comment IDs
+- Partial retraction: if one step fails, the remaining steps still execute
+- Skips actions with zero/empty IDs (safe for migrated old-format state)
+- Poll state updated after retraction: issue cleared from `issues` map and `lastPollIssueNumbers`
+- `deepagents retract --issue N` CLI subcommand with summary output
+- `RetractResult` interface exported for programmatic use
+- 7 new unit tests covering: full retraction, missing state, missing issue, partial retraction, error handling, migrated-format safety
+
+---
+
 ## v0.4.0 — 2026-02-08
 
 **Milestone: Phase 4 (Intelligence) complete.** Issues go through triage (cheap/fast) then deep analysis (thorough) with triage context passed through.

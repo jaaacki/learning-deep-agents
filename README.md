@@ -50,6 +50,9 @@ pnpm run cli analyze --issue 42
 # Triage a single issue (cheap/fast classification)
 pnpm run cli triage --issue 42
 
+# Retract all agent actions on an issue (close PR, delete branch, delete comment)
+pnpm run cli retract --issue 42
+
 # Start webhook listener (real-time, replaces cron)
 pnpm run cli webhook
 
@@ -230,7 +233,7 @@ pnpm test
 pnpm run test:watch
 ```
 
-177 tests across 8 test files using [vitest](https://vitest.dev/) with mocked external dependencies (Octokit, LLM constructors, filesystem). No real API calls are made during testing.
+198 tests across 8 test files using [vitest](https://vitest.dev/) with mocked external dependencies (Octokit, LLM constructors, filesystem). No real API calls are made during testing.
 
 ## File Structure
 
