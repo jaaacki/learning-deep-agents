@@ -5278,3 +5278,62 @@ This is the exact same pattern as Batch 1's CHANGELOG/LEARNING_LOG conflicts, bu
 **Merge order: PR #41 first, then rebase and merge PR #40.**
 
 **Test counts after both merge:** 198 total (191 from PR #41 + 7 new retract tests from PR #40). Both branches pass all tests independently.
+
+---
+
+## Entry 40: Webhook issues.opened Handler -- From Polling to Push (Issue #13)
+
+**Date:** 2026-02-09
+**Author:** Builder Agent (consolidated by merge coordinator)
+**Issue:** #13 — Handle `issues.opened` webhook event
+
+### What changed
+
+Added `handleIssuesEvent()` to `src/listener.ts` that dispatches `issues.opened` webhook events to the existing `runAnalyzeSingle()` pipeline. This is the first real event handler wired into the webhook listener (previously it only logged events).
+
+### Design decisions
+
+1. **Fire-and-forget pattern.** The webhook POST handler responds with `200 OK` immediately, then dispatches to `handleIssuesEvent` asynchronously. GitHub retries on timeout (10 seconds), so we must respond fast. The actual analysis (which can take minutes) runs in the background. Errors are caught and logged -- they never bubble up to crash the server.
+
+2. **Config threading.** `createWebhookApp` and `startWebhookServer` now accept an optional `Config` parameter. Without it, events are logged but not processed (backwards-compatible with existing tests). When provided, `handleWebhookEvent` routes events to the appropriate handler.
+
+3. **Only `opened` action triggers analysis.** The `issues` event fires for many actions (edited, closed, labeled, etc.). We only care about `opened` -- new issues that need triage. All other actions are logged and ignored.
+
+---
+
+## Entry 41: PR.opened Webhook Handler -- Loop Prevention and Stub Design (Issue #14)
+
+**Date:** 2026-02-08
+**Author:** Builder Agent
+**Issue:** #14 — Handle `pull_request.opened` webhook event
+
+### What we built
+
+A handler for `pull_request.opened` events in the webhook listener. When GitHub sends a PR event, the handler decides whether it was created by our bot and logs it for future review.
+
+### Key design decision: Loop prevention
+
+The bot creates PRs as part of its workflow (via `create_pull_request` tool). If the webhook listener naively processed every PR event, it could trigger an infinite loop: bot creates PR -> webhook fires -> bot processes PR -> bot creates another PR -> ...
+
+We prevent this with a **dual-signal check** in `isBotPr()`:
+
+1. **HTML marker** (`<!-- deep-agent-pr -->`) — the `create_pull_request` tool already embeds this in PR bodies. This is the primary signal.
+2. **Branch naming convention** (`issue-N-*` regex) — a fallback signal if the marker is missing or the PR body was edited.
+
+If *either* signal matches, we treat it as a bot-created PR. This is deliberately permissive — false positives (treating a human PR as bot-created) are harmless (we just log it), while false negatives (treating a bot PR as human) could cause loops.
+
+### Why a stub, not the full reviewer
+
+Issue #15 will implement the actual PR review agent. This handler is a hook point: it extracts metadata, checks for bot origin, and returns a `PrHandlerResult` with `reviewQueued: true`. The `PrReviewStub` interface is exported so #15 can wire in without modifying the handler's dispatch logic.
+
+### Fire-and-forget pattern
+
+The webhook endpoint responds 200 immediately, then dispatches to handlers. This follows GitHub's guidance: webhook deliveries time out after 10 seconds, so long-running work should be deferred. The handler is synchronous today (just logging), but the pattern is ready for async work in #15.
+
+### The dispatcher
+
+`handleWebhookEvent()` is a simple router that checks `event.event` and delegates. It returns `null` for unhandled events, making it easy for #13 (issues.opened) to add its case. Both #13 and #14 can merge independently — the dispatcher handles the union.
+
+### Test coverage
+
+17 new tests covering: `isBotPr` helper (5), `handlePullRequestEvent` (9 cases including bot/non-bot/missing-data/wrong-action), `handleWebhookEvent` dispatcher (3). Total: 215 tests across 8 files.

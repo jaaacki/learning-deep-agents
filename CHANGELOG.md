@@ -9,6 +9,26 @@
 
 ---
 
+## v0.6.0 — 2026-02-09
+
+**Milestone: Phase 6 (Webhook & Real-Time) partially complete.** The webhook listener now dispatches `issues.opened` and `pull_request.opened` events. Issue #18 (persistent job queue) deferred — not needed for learning goals.
+
+### Added
+- **Handle `issues.opened` webhook event** (Issue #13) — triggers analysis pipeline on new issues
+- `handleIssuesEvent()` extracts issue number, calls `runAnalyzeSingle()` for triage + analysis
+- `createWebhookApp()` and `startWebhookServer()` accept optional full `Config` for analysis dispatch
+- Fire-and-forget pattern: webhook responds 200 immediately, analysis runs async
+- **Handle `pull_request.opened` webhook event** (Issue #14) — dispatches PR events from the webhook listener
+- `handlePullRequestEvent()` extracts PR metadata (number, title, body, head/base ref, draft status)
+- **Loop prevention**: `isBotPr()` checks for `<!-- deep-agent-pr -->` HTML marker in PR body OR `issue-N-*` branch naming pattern
+- Bot-created PRs are logged as "queued for review" (stub — actual reviewer bot deferred to Issue #15)
+- Non-bot PRs are ignored (logged and skipped)
+- `handleWebhookEvent()` dispatcher routes events to the correct handler
+- `PrReviewStub` interface exported for Issue #15 to wire into
+- 23 new tests: handleIssuesEvent (6), isBotPr (5), handlePullRequestEvent (9), handleWebhookEvent dispatcher (3)
+
+---
+
 ## v0.5.0 — 2026-02-08
 
 **Milestone: Phase 5 (Resilience) complete.** Transient API failures are retried. Container stops don't lose work. Agent actions can be retracted by humans via CLI. Tool calls are logged with arguments and timing.

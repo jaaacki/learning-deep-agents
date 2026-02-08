@@ -85,18 +85,18 @@ An autonomous bot that watches a GitHub repository, analyzes new issues with AI,
 
 ---
 
-## Phase 6 — Webhook & Real-Time
+## Phase 6 — Webhook & Real-Time ✓ (v0.6.0)
 
 > Replace cron polling with real-time GitHub webhook processing.
 
 | # | Issue | Status |
 |---|-------|--------|
 | [#12](../../issues/12) | HTTP webhook listener | ✓ v0.3.5 |
-| [#13](../../issues/13) | Handle `issues.opened` event | Open |
-| [#14](../../issues/14) | Handle `pull_request.opened` event | Open |
-| [#18](../../issues/18) | Persistent job queue (PostgreSQL) | Open |
+| [#13](../../issues/13) | Handle `issues.opened` event | ✓ v0.6.0 |
+| [#14](../../issues/14) | Handle `pull_request.opened` event | ✓ v0.6.0 |
+| [#18](../../issues/18) | Persistent job queue (PostgreSQL) | Deferred |
 
-**Milestone:** Issues are processed in real-time. Events are queued in PostgreSQL and processed one at a time. Cron mode still works as a fallback.
+**Milestone:** Issues are processed in real-time via webhooks. PR events are dispatched with loop prevention. Cron mode still works as a fallback. Job queue (#18) deferred — fire-and-forget is sufficient for a learning project.
 
 ---
 

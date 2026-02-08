@@ -1,7 +1,21 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { createHmac } from 'crypto';
-import { createWebhookApp, verifySignature } from '../src/listener.js';
-import type { WebhookConfig } from '../src/listener.js';
+import {
+  createWebhookApp,
+  verifySignature,
+  handlePullRequestEvent,
+  handleWebhookEvent,
+  handleIssuesEvent,
+  isBotPr,
+  BOT_PR_MARKER,
+} from '../src/listener.js';
+import type { WebhookConfig, WebhookEvent } from '../src/listener.js';
+
+vi.mock('../src/core.js', () => ({
+  runAnalyzeSingle: vi.fn().mockResolvedValue(undefined),
+}));
+
+import { runAnalyzeSingle } from '../src/core.js';
 
 // ── verifySignature ──────────────────────────────────────────────────────────
 
@@ -260,5 +274,323 @@ describe('createWebhookApp', () => {
 
     expect(res.status).toBe(400);
     expect(res.body.error).toBe('Invalid JSON payload');
+  });
+});
+
+// ── isBotPr ─────────────────────────────────────────────────────────────────
+
+describe('isBotPr', () => {
+  it('returns true when body contains the bot marker', () => {
+    expect(isBotPr(`Some text ${BOT_PR_MARKER} more text`, 'feature-branch')).toBe(true);
+  });
+
+  it('returns true when branch matches issue-N-* pattern', () => {
+    expect(isBotPr('no marker here', 'issue-42-fix-login')).toBe(true);
+  });
+
+  it('returns true when both marker and branch match', () => {
+    expect(isBotPr(`Body with ${BOT_PR_MARKER}`, 'issue-7-update')).toBe(true);
+  });
+
+  it('returns false for non-bot PR', () => {
+    expect(isBotPr('Regular PR body', 'feature/my-change')).toBe(false);
+  });
+
+  it('returns false for branch that looks similar but does not match', () => {
+    expect(isBotPr('', 'issues-42-wrong-prefix')).toBe(false);
+  });
+});
+
+// ── handlePullRequestEvent ──────────────────────────────────────────────────
+
+describe('handlePullRequestEvent', () => {
+  beforeEach(() => {
+    vi.spyOn(console, 'log').mockImplementation(() => {});
+    vi.spyOn(console, 'error').mockImplementation(() => {});
+  });
+
+  afterEach(() => {
+    vi.restoreAllMocks();
+  });
+
+  function makeEvent(overrides: Partial<WebhookEvent> & { payload: Record<string, unknown> }): WebhookEvent {
+    return {
+      event: 'pull_request',
+      deliveryId: 'test-delivery',
+      ...overrides,
+    };
+  }
+
+  function makePrPayload(opts: {
+    action?: string;
+    number?: number;
+    title?: string;
+    body?: string;
+    headRef?: string;
+    baseRef?: string;
+    draft?: boolean;
+  } = {}): Record<string, unknown> {
+    return {
+      action: opts.action ?? 'opened',
+      pull_request: {
+        number: opts.number ?? 99,
+        title: opts.title ?? 'Fix #42: test fix',
+        body: opts.body ?? `Some description\n${BOT_PR_MARKER}\nCloses #42`,
+        draft: opts.draft ?? true,
+        head: { ref: opts.headRef ?? 'issue-42-test-fix' },
+        base: { ref: opts.baseRef ?? 'main' },
+      },
+    };
+  }
+
+  it('queues bot-created PR (marker in body) for review', () => {
+    const event = makeEvent({ payload: makePrPayload({ body: `text ${BOT_PR_MARKER} text` }) });
+    const result = handlePullRequestEvent(event);
+
+    expect(result.handled).toBe(true);
+    expect(result.reviewQueued).toBe(true);
+    expect(result.reason).toContain('Issue #15');
+    expect(result.pr?.number).toBe(99);
+  });
+
+  it('queues bot-created PR (branch pattern) for review', () => {
+    const event = makeEvent({
+      payload: makePrPayload({ body: 'no marker', headRef: 'issue-10-add-tests' }),
+    });
+    const result = handlePullRequestEvent(event);
+
+    expect(result.handled).toBe(true);
+    expect(result.reviewQueued).toBe(true);
+  });
+
+  it('ignores non-bot PR', () => {
+    const event = makeEvent({
+      payload: makePrPayload({
+        body: 'Regular PR from a human',
+        headRef: 'feature/my-change',
+      }),
+    });
+    const result = handlePullRequestEvent(event);
+
+    expect(result.handled).toBe(true);
+    expect(result.reviewQueued).toBe(false);
+    expect(result.reason).toBe('PR not created by bot');
+    expect(result.pr?.number).toBe(99);
+  });
+
+  it('ignores pull_request.closed action', () => {
+    const event = makeEvent({ payload: makePrPayload({ action: 'closed' }) });
+    const result = handlePullRequestEvent(event);
+
+    expect(result.handled).toBe(false);
+    expect(result.reviewQueued).toBe(false);
+    expect(result.reason).toContain('Ignored action: closed');
+  });
+
+  it('ignores pull_request.synchronize action', () => {
+    const event = makeEvent({ payload: makePrPayload({ action: 'synchronize' }) });
+    const result = handlePullRequestEvent(event);
+
+    expect(result.handled).toBe(false);
+    expect(result.reason).toContain('Ignored action: synchronize');
+  });
+
+  it('handles missing pull_request in payload gracefully', () => {
+    const event = makeEvent({ payload: { action: 'opened' } });
+    const result = handlePullRequestEvent(event);
+
+    expect(result.handled).toBe(false);
+    expect(result.reason).toBe('Missing PR data in payload');
+    expect(console.error).toHaveBeenCalledWith(
+      expect.stringContaining('missing PR data'),
+    );
+  });
+
+  it('handles pull_request with missing number gracefully', () => {
+    const event = makeEvent({
+      payload: {
+        action: 'opened',
+        pull_request: { title: 'No number field' },
+      },
+    });
+    const result = handlePullRequestEvent(event);
+
+    expect(result.handled).toBe(false);
+    expect(result.reason).toBe('Missing PR data in payload');
+  });
+
+  it('extracts PR metadata correctly', () => {
+    const event = makeEvent({
+      payload: makePrPayload({
+        number: 55,
+        title: 'Fix #10: handle edge case',
+        body: `Detailed description\n${BOT_PR_MARKER}`,
+        headRef: 'issue-10-edge-case',
+        baseRef: 'develop',
+        draft: false,
+      }),
+    });
+    const result = handlePullRequestEvent(event);
+
+    expect(result.pr).toEqual({
+      number: 55,
+      title: 'Fix #10: handle edge case',
+      body: `Detailed description\n${BOT_PR_MARKER}`,
+      headRef: 'issue-10-edge-case',
+      baseRef: 'develop',
+      draft: false,
+    });
+  });
+
+  it('returns reviewQueued: true with clear "not implemented" indicator', () => {
+    const event = makeEvent({ payload: makePrPayload() });
+    const result = handlePullRequestEvent(event);
+
+    expect(result.reviewQueued).toBe(true);
+    expect(result.reason).toMatch(/not implemented/i);
+  });
+});
+
+// ── handleWebhookEvent (dispatcher) ─────────────────────────────────────────
+
+describe('handleWebhookEvent', () => {
+  beforeEach(() => {
+    vi.spyOn(console, 'log').mockImplementation(() => {});
+    vi.spyOn(console, 'error').mockImplementation(() => {});
+  });
+
+  afterEach(() => {
+    vi.restoreAllMocks();
+  });
+
+  it('dispatches pull_request events', () => {
+    const event: WebhookEvent = {
+      event: 'pull_request',
+      deliveryId: 'dispatch-1',
+      payload: {
+        action: 'opened',
+        pull_request: {
+          number: 77,
+          title: 'Test',
+          body: BOT_PR_MARKER,
+          draft: true,
+          head: { ref: 'issue-77-test' },
+          base: { ref: 'main' },
+        },
+      },
+    };
+
+    // Should not throw
+    handleWebhookEvent(event);
+    expect(console.log).toHaveBeenCalledWith(expect.stringContaining('queued for review'));
+  });
+
+  it('dispatches issues events', () => {
+    const event: WebhookEvent = {
+      event: 'issues',
+      deliveryId: 'dispatch-3',
+      payload: { action: 'opened', issue: { number: 1 } },
+    };
+
+    // Should not throw — fires and forgets
+    handleWebhookEvent(event);
+    expect(console.log).toHaveBeenCalledWith(expect.stringContaining('Issue #1'));
+  });
+
+  it('ignores unhandled event types without error', () => {
+    const event: WebhookEvent = {
+      event: 'push',
+      deliveryId: 'dispatch-2',
+      payload: { ref: 'refs/heads/main' },
+    };
+
+    handleWebhookEvent(event);
+    // Should not call error
+    expect(console.error).not.toHaveBeenCalled();
+  });
+});
+
+// ── handleIssuesEvent ───────────────────────────────────────────────────────
+
+describe('handleIssuesEvent', () => {
+  beforeEach(() => {
+    vi.spyOn(console, 'log').mockImplementation(() => {});
+    vi.spyOn(console, 'error').mockImplementation(() => {});
+    vi.mocked(runAnalyzeSingle).mockReset().mockResolvedValue(undefined);
+  });
+
+  afterEach(() => {
+    vi.restoreAllMocks();
+  });
+
+  function makeEvent(payload: Record<string, unknown>): WebhookEvent {
+    return { event: 'issues', deliveryId: 'test-delivery', payload };
+  }
+
+  it('triggers analysis for issues.opened event with config', async () => {
+    const config = { github: { owner: 'o', repo: 'r', token: 't' }, llm: { provider: 'anthropic', apiKey: 'k', model: 'm' } } as any;
+    const event = makeEvent({ action: 'opened', issue: { number: 42, title: 'Bug' } });
+
+    const result = await handleIssuesEvent(event, config);
+
+    expect(result.handled).toBe(true);
+    expect(result.issueNumber).toBe(42);
+    expect(runAnalyzeSingle).toHaveBeenCalledWith(config, 42);
+  });
+
+  it('skips analysis when no config is provided', async () => {
+    const event = makeEvent({ action: 'opened', issue: { number: 5 } });
+
+    const result = await handleIssuesEvent(event);
+
+    expect(result.handled).toBe(true);
+    expect(result.issueNumber).toBe(5);
+    expect(result.reason).toContain('skipped');
+    expect(runAnalyzeSingle).not.toHaveBeenCalled();
+  });
+
+  it('ignores issues.edited action', async () => {
+    const event = makeEvent({ action: 'edited', issue: { number: 3 } });
+
+    const result = await handleIssuesEvent(event);
+
+    expect(result.handled).toBe(false);
+    expect(result.reason).toContain('Ignored action: edited');
+    expect(runAnalyzeSingle).not.toHaveBeenCalled();
+  });
+
+  it('ignores issues.closed action', async () => {
+    const event = makeEvent({ action: 'closed', issue: { number: 3 } });
+
+    const result = await handleIssuesEvent(event);
+
+    expect(result.handled).toBe(false);
+    expect(result.reason).toContain('Ignored action: closed');
+  });
+
+  it('handles missing issue data gracefully', async () => {
+    const event = makeEvent({ action: 'opened' });
+
+    const result = await handleIssuesEvent(event);
+
+    expect(result.handled).toBe(false);
+    expect(result.reason).toContain('Missing issue data');
+    expect(console.error).toHaveBeenCalledWith(expect.stringContaining('missing issue data'));
+  });
+
+  it('handles analysis errors without crashing', async () => {
+    const config = { github: { owner: 'o', repo: 'r', token: 't' }, llm: { provider: 'anthropic', apiKey: 'k', model: 'm' } } as any;
+    vi.mocked(runAnalyzeSingle).mockRejectedValue(new Error('API down'));
+
+    const event = makeEvent({ action: 'opened', issue: { number: 99 } });
+
+    const result = await handleIssuesEvent(event, config);
+
+    expect(result.handled).toBe(true);
+    expect(result.issueNumber).toBe(99);
+    expect(console.error).toHaveBeenCalledWith(
+      expect.stringContaining('Analysis failed'),
+      expect.any(Error),
+    );
   });
 });

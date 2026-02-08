@@ -1,6 +1,8 @@
 import { createHmac, timingSafeEqual } from 'crypto';
 import express from 'express';
-import type { Request, Response, NextFunction } from 'express';
+import type { Request, Response } from 'express';
+import type { Config } from './config.js';
+import { runAnalyzeSingle } from './core.js';
 
 /**
  * Webhook listener configuration.
@@ -20,6 +22,177 @@ export interface WebhookEvent {
   deliveryId: string;
   /** The parsed JSON payload */
   payload: Record<string, unknown>;
+}
+
+/** Marker that identifies PRs created by this bot. */
+export const BOT_PR_MARKER = '<!-- deep-agent-pr -->';
+
+/** Branch naming pattern used by the bot: issue-N-description */
+const BOT_BRANCH_RE = /^issue-\d+-/;
+
+/**
+ * Extracted metadata from a pull_request.opened payload.
+ */
+export interface PrOpenedData {
+  number: number;
+  title: string;
+  body: string;
+  headRef: string;
+  baseRef: string;
+  draft: boolean;
+}
+
+/**
+ * Result of handling a pull_request.opened event.
+ * The `reviewQueued` field indicates whether the PR was recognized as
+ * bot-created and queued for future review (Issue #15).
+ */
+export interface PrHandlerResult {
+  handled: boolean;
+  reviewQueued: boolean;
+  reason: string;
+  pr?: PrOpenedData;
+}
+
+/**
+ * Stub interface for the future PR reviewer (Issue #15).
+ * When the reviewer bot is implemented, it will satisfy this interface
+ * and be wired into handlePullRequestEvent.
+ */
+export interface PrReviewStub {
+  reviewPr(pr: PrOpenedData): Promise<void>;
+}
+
+/**
+ * Check if a PR was created by this bot.
+ * Uses two signals: the HTML marker in the PR body, or the branch naming convention.
+ */
+export function isBotPr(body: string, headRef: string): boolean {
+  return body.includes(BOT_PR_MARKER) || BOT_BRANCH_RE.test(headRef);
+}
+
+/**
+ * Handle a pull_request.opened webhook event.
+ *
+ * - If the PR was created by the bot, log it as queued for review and return.
+ *   (The actual reviewer bot will be added in Issue #15.)
+ * - If the PR was NOT created by the bot, ignore it.
+ * - Returns immediately (fire-and-forget pattern for the webhook endpoint).
+ */
+export function handlePullRequestEvent(event: WebhookEvent): PrHandlerResult {
+  const { payload } = event;
+
+  if (payload.action !== 'opened') {
+    return { handled: false, reviewQueued: false, reason: `Ignored action: ${payload.action}` };
+  }
+
+  const pr = payload.pull_request as Record<string, unknown> | undefined;
+  if (!pr || typeof pr.number !== 'number') {
+    console.error(`[webhook] pull_request.opened missing PR data (delivery: ${event.deliveryId})`);
+    return { handled: false, reviewQueued: false, reason: 'Missing PR data in payload' };
+  }
+
+  const head = pr.head as Record<string, unknown> | undefined;
+  const base = pr.base as Record<string, unknown> | undefined;
+
+  const prData: PrOpenedData = {
+    number: pr.number as number,
+    title: (pr.title as string) ?? '',
+    body: (pr.body as string) ?? '',
+    headRef: (head?.ref as string) ?? '',
+    baseRef: (base?.ref as string) ?? '',
+    draft: (pr.draft as boolean) ?? false,
+  };
+
+  if (!isBotPr(prData.body, prData.headRef)) {
+    console.log(
+      `[webhook] PR #${prData.number} not created by bot, ignoring ` +
+      `(delivery: ${event.deliveryId})`,
+    );
+    return { handled: true, reviewQueued: false, reason: 'PR not created by bot', pr: prData };
+  }
+
+  // Bot-created PR — queue for review (stub until Issue #15)
+  console.log(
+    `[webhook] PR #${prData.number} "${prData.title}" queued for review ` +
+    `(delivery: ${event.deliveryId}) [reviewer not implemented yet]`,
+  );
+
+  return {
+    handled: true,
+    reviewQueued: true,
+    reason: 'Queued for review (reviewer not implemented yet — see Issue #15)',
+    pr: prData,
+  };
+}
+
+/**
+ * Result of handling an issues.opened event.
+ */
+export interface IssueHandlerResult {
+  handled: boolean;
+  issueNumber?: number;
+  reason: string;
+}
+
+/**
+ * Handle an issues.opened webhook event.
+ *
+ * Extracts the issue number and triggers the analysis pipeline
+ * (triage + analysis) via runAnalyzeSingle. Runs async (fire-and-forget)
+ * so the webhook endpoint can return 200 immediately.
+ */
+export async function handleIssuesEvent(event: WebhookEvent, config?: Config): Promise<IssueHandlerResult> {
+  const { payload } = event;
+
+  if (payload.action !== 'opened') {
+    return { handled: false, reason: `Ignored action: ${payload.action}` };
+  }
+
+  const issue = payload.issue as Record<string, unknown> | undefined;
+  if (!issue || typeof issue.number !== 'number') {
+    console.error(`[webhook] issues.opened missing issue data (delivery: ${event.deliveryId})`);
+    return { handled: false, reason: 'Missing issue data in payload' };
+  }
+
+  const issueNumber = issue.number as number;
+  console.log(
+    `[webhook] Issue #${issueNumber} opened, triggering analysis ` +
+    `(delivery: ${event.deliveryId})`,
+  );
+
+  if (!config) {
+    console.log(`[webhook] No config provided, skipping analysis for issue #${issueNumber}`);
+    return { handled: true, issueNumber, reason: 'No config — analysis skipped' };
+  }
+
+  try {
+    await runAnalyzeSingle(config, issueNumber);
+    console.log(`[webhook] Analysis complete for issue #${issueNumber}`);
+  } catch (err) {
+    console.error(`[webhook] Analysis failed for issue #${issueNumber}:`, err);
+  }
+
+  return { handled: true, issueNumber, reason: 'Analysis triggered' };
+}
+
+/**
+ * Dispatch a parsed webhook event to the appropriate handler.
+ * Config is optional — when provided, issues.opened events trigger analysis.
+ */
+export function handleWebhookEvent(event: WebhookEvent, config?: Config): void {
+  if (event.event === 'pull_request') {
+    handlePullRequestEvent(event);
+    return;
+  }
+
+  if (event.event === 'issues') {
+    // Fire-and-forget — don't await, just log errors
+    handleIssuesEvent(event, config).catch((err) => {
+      console.error(`[webhook] Issues handler error:`, err);
+    });
+    return;
+  }
 }
 
 /**
@@ -59,10 +232,11 @@ export function verifySignature(
  * - POST /webhook — receives GitHub webhook payloads
  *
  * The webhook endpoint verifies the HMAC signature, parses the event
- * type and delivery ID from headers, and logs the event. Actual event
- * handling (dispatching to agent workflows) is deferred to Issue #13/#14.
+ * type and delivery ID from headers, and dispatches to event handlers.
+ *
+ * When fullConfig is provided, issues.opened events trigger analysis.
  */
-export function createWebhookApp(config: WebhookConfig): express.Express {
+export function createWebhookApp(config: WebhookConfig, fullConfig?: Config): express.Express {
   const app = express();
 
   // Parse raw body for HMAC verification, then JSON
@@ -112,14 +286,22 @@ export function createWebhookApp(config: WebhookConfig): express.Express {
       payload,
     };
 
-    // Log the event (actual handling deferred to #13/#14)
+    // Log the event
     const action = typeof payload.action === 'string' ? payload.action : '';
     console.log(
       `[webhook] Received: ${event}${action ? `.${action}` : ''} ` +
       `(delivery: ${webhookEvent.deliveryId})`,
     );
 
+    // Fire-and-forget: respond 200 immediately, then dispatch
     res.status(200).json({ received: true, event, deliveryId: webhookEvent.deliveryId });
+
+    // Dispatch to event handlers (async, after response is sent)
+    try {
+      handleWebhookEvent(webhookEvent, fullConfig);
+    } catch (err) {
+      console.error(`[webhook] Handler error for ${event}.${action}:`, err);
+    }
   });
 
   return app;
@@ -131,8 +313,8 @@ export function createWebhookApp(config: WebhookConfig): express.Express {
  * Returns the HTTP server instance so callers can close it for graceful
  * shutdown or in tests.
  */
-export function startWebhookServer(config: WebhookConfig) {
-  const app = createWebhookApp(config);
+export function startWebhookServer(config: WebhookConfig, fullConfig?: Config) {
+  const app = createWebhookApp(config, fullConfig);
 
   const server = app.listen(config.port, () => {
     console.log(`[webhook] Listening on port ${config.port}`);
