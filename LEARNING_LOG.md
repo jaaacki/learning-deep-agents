@@ -4548,3 +4548,539 @@ The two hard constraints from the pre-implementation review were honored:
 **Cross-branch contamination spreads silently.** Two builders (#36, #37) started from branches that included other builders' work, creating duplicate content. Mitigation: all parallel builders should branch from the same base commit (main), not from each other.
 
 **The compositional architecture paid off.** The wrapping stack (retry inside, circuit breaker middle, logging outside) allowed three separate builders to work on overlapping concerns without code conflicts. The Decorator pattern established in Phase 2 made Phase 5 parallelism possible. Good architecture is not just about the current feature -- it is about what it enables next.
+
+---
+
+## Entry 35: Architect's Full Roadmap Completion Plan -- 10 Issues Across 5 Phases
+
+**Date:** 2026-02-08
+**Author:** Architect Agent
+**Builds on:** Entry 8 (Dependency Map), Entry 24 (Phase 4 Architecture), Entry 27 (Cross-Phase Parallelism), Entry 34 (Batch 1 Critic Review)
+
+### Context
+
+We are at v0.3.7 with 177 tests across 8 test files. Phases 1-3 are complete. Phase 4 is half done (triage agent shipped, analysis agent remains). Phase 5 is mostly done (retry, shutdown, metadata, logging shipped; retract command remains). Phase 6 is started (webhook listener shipped; event handlers and job queue remain). Phases 7 and 8 are untouched.
+
+Ten open issues remain: #4, #32, #13, #14, #18, #21, #20, #19, #15, #16.
+
+This entry defines the full batch plan, dependency graph, pre-assigned entry numbers, and version targets for completing the project.
+
+---
+
+### 1. Dependency graph
+
+Each arrow means "must be done before." File-level and API-level dependencies are called out.
+
+```
+#4  Analysis Agent (StateGraph pipeline, triage-to-analysis handoff)
+    └── depends on: #3 (triage, DONE) -- TriageOutput interface in triage-agent.ts
+    └── touches: src/core.ts (runPollCycle analysis phase), src/agent.ts (agent factory)
+    └── new file: src/analysis-graph.ts (StateGraph wiring)
+
+#32 Retract Command
+    └── depends on: #31 (enriched metadata, DONE) -- IssueActions with comment.id, branch.name, pr.number
+    └── touches: src/cli.ts (new subcommand), src/core.ts (new retract function)
+    └── uses: Octokit delete/close APIs
+
+#13 Handle issues.opened
+    └── depends on: #12 (webhook listener, DONE) -- createWebhookApp() in listener.ts
+    └── depends on: #4 (analysis agent) -- needs the analysis pipeline to dispatch to
+    └── touches: src/listener.ts (event handler), src/core.ts (runAnalyzeSingle or new entry point)
+
+#14 Handle pull_request.opened
+    └── depends on: #12 (webhook listener, DONE)
+    └── no dependency on #4 or #13 (different event type, can be independent handler)
+    └── touches: src/listener.ts (event handler)
+    └── may need new tool: fetch PR details / diff
+
+#18 Persistent Job Queue (PostgreSQL)
+    └── depends on: #13, #14 (need event handlers to know what to enqueue)
+    └── new file: src/queue.ts (pg-based queue)
+    └── new dependency: pg or postgres.js in package.json
+    └── touches: src/listener.ts (enqueue instead of direct dispatch), src/core.ts (dequeue + process)
+
+#20 Health Check Endpoint
+    └── depends on: #12 (webhook listener, DONE) -- GET /health already exists
+    └── see audit below (Section 6)
+
+#21 Docker + Caddy Deployment
+    └── depends on: #18 (job queue) -- Dockerfile needs PostgreSQL setup
+    └── depends on: #20 (health check) -- Caddy health probe
+    └── new files: Dockerfile, docker-compose.yml, Caddyfile
+
+#19 GitHub App Migration
+    └── depends on: #21 (deployment) -- App registration needs a public webhook URL
+    └── touches: src/config.ts (new auth mode), src/github-tools.ts (App auth via Octokit)
+    └── new dependency: @octokit/auth-app
+
+#15 PR Review Agent
+    └── depends on: #16 (submit_pr_review tool) -- the agent needs the tool to post reviews
+    └── depends on: #4 (analysis agent pattern) -- establishes the StateGraph pattern
+    └── touches: new file src/review-agent.ts
+
+#16 submit_pr_review Tool
+    └── no code dependencies on other open issues
+    └── touches: src/github-tools.ts (new tool factory)
+    └── uses: Octokit pulls.createReview API
+```
+
+**Simplified DAG:**
+```
+          #4 ──────────┐
+          │            │
+          ▼            │
+  #13 ──► #18 ──► #21 ──► #19
+  #14 ──┘         ▲
+                  │
+          #20 ───┘
+
+  #32 (independent -- no downstream dependents)
+
+  #16 ──► #15 (Phase 8 pair, mostly independent of main chain)
+```
+
+---
+
+### 2. Batch plan
+
+Lessons applied from Batch 1:
+- All builders branch from the SAME main commit
+- Entry numbers pre-assigned to prevent collisions
+- File conflict zones identified per batch
+
+#### Batch 2: Phase 4 Completion + Phase 5 Completion (2 parallel issues)
+
+| Issue | Builder | Entry # | Version bump |
+|-------|---------|---------|-------------|
+| #4 Analysis Agent | Builder A | 36, 37 (impl + learning) | v0.4.0 |
+| #32 Retract Command | Builder B | 38, 39 (impl + learning) | v0.5.0 |
+
+**Why parallel:** #4 and #32 have zero file overlap.
+- #4 touches: `src/core.ts` (analysis phase only), `src/agent.ts`, new `src/analysis-graph.ts`
+- #32 touches: `src/cli.ts` (new subcommand), `src/core.ts` (new retract function), `src/github-tools.ts` (new delete tools)
+
+**File conflict risk:** Both touch `src/core.ts`, but in different sections. #4 modifies the analysis phase (lines 538-628). #32 adds a new exported function at the bottom. Low conflict risk -- append vs. modify different sections.
+
+**Version bumps:** #4 completes Phase 4 -> v0.4.0. #32 completes Phase 5 -> v0.5.0. Merge #4 first, bump to v0.4.0, then merge #32, bump to v0.5.0. The version bumps are sequential even though development is parallel.
+
+**Both touch CHANGELOG.md and LEARNING_LOG.md.** These get renumbered at merge time (same pattern as Batch 1).
+
+#### Batch 3: Phase 6 Event Handlers (2 parallel issues)
+
+| Issue | Builder | Entry # | Version bump |
+|-------|---------|---------|-------------|
+| #13 issues.opened handler | Builder A | 40 | patch |
+| #14 pull_request.opened handler | Builder B | 41 | patch |
+
+**Prerequisite:** Batch 2 must be merged first. #13 needs #4's analysis pipeline to dispatch to.
+
+**Why parallel:** #13 and #14 both touch `src/listener.ts` but add independent event handlers. The handlers are additive (new `if` branches in the webhook POST handler), so merge conflicts will be trivial.
+
+**File conflict risk:** Medium on `src/listener.ts`. Both add handler logic to the webhook route. Mitigation: extract a `handleEvent(event: WebhookEvent)` dispatcher function that both can independently add cases to (switch/case on event type). If builders coordinate this pattern, conflicts become trivial.
+
+#### Batch 4: Job Queue (1 issue, sequential)
+
+| Issue | Builder | Entry # | Version bump |
+|-------|---------|---------|-------------|
+| #18 PostgreSQL job queue | Builder A | 42 | v0.6.0 |
+
+**Why sequential:** #18 is the most architecturally complex remaining issue. It:
+- Adds a new runtime dependency (PostgreSQL client library)
+- Creates a new module (`src/queue.ts`)
+- Modifies `src/listener.ts` to enqueue instead of directly dispatching
+- Modifies `src/core.ts` or creates `src/worker.ts` for dequeue + process
+- Needs new config fields (database connection string)
+- Needs migration SQL for the job table
+
+This issue should NOT be parallelized. It cross-cuts too many files and introduces a new infrastructure dependency. The builder needs full attention without merge conflicts.
+
+**Version bump:** Completes Phase 6 -> v0.6.0.
+
+#### Batch 5: Deployment (2 parallel issues, with #20 audit caveat)
+
+| Issue | Builder | Entry # | Version bump |
+|-------|---------|---------|-------------|
+| #21 Docker + Caddy | Builder A | 43 | patch |
+| #19 GitHub App migration | Builder B | 44 | patch -> v0.7.0 |
+
+**Prerequisite:** Batch 4 must be merged. Docker setup needs PostgreSQL in docker-compose.yml.
+
+**Why parallel:** #21 creates new files (Dockerfile, docker-compose.yml, Caddyfile) that #19 does not touch. #19 modifies `src/config.ts` and `src/github-tools.ts` which #21 does not touch. Zero file overlap.
+
+**#20 Health Check:** See Section 6 below. If the audit confirms GET /health is sufficient, close #20 with no code changes and no batch slot needed.
+
+**Version bump:** After both merge, bump to v0.7.0 (Phase 7 complete).
+
+#### Batch 6: Phase 8 -- Reviewer Bot (2 parallel issues, or deferred)
+
+| Issue | Builder | Entry # | Version bump |
+|-------|---------|---------|-------------|
+| #16 submit_pr_review tool | Builder A | 45 | patch |
+| #15 PR review agent | Builder B | 46 | v1.0.0 |
+
+**Prerequisite:** #16 must merge before #15 starts (the agent needs the tool). So these are sequential within the batch, not truly parallel. Builder B waits for Builder A.
+
+**See Section 7 for the "same repo vs. new repo" recommendation.**
+
+---
+
+### 3. Pre-assigned LEARNING_LOG entry numbers
+
+This table eliminates the collision problem from Batch 1. Each builder writes ONLY their assigned entry numbers. The merge coordinator does NOT renumber.
+
+| Entry | Issue | Author | Title |
+|-------|-------|--------|-------|
+| 35 | -- | Architect | This entry (Full Roadmap Completion Plan) |
+| 36 | #4 | Builder | Analysis Agent Implementation |
+| 37 | #4 | Builder | StateGraph Pipeline -- Why This Design |
+| 38 | #32 | Builder | Retract Command Implementation |
+| 39 | #32 | Builder | Undo Architecture -- Design Decisions |
+| 40 | #13 | Builder | issues.opened Webhook Handler |
+| 41 | #14 | Builder | pull_request.opened Webhook Handler |
+| 42 | #18 | Builder | PostgreSQL Job Queue -- From Memory to Persistence |
+| 43 | #21 | Builder | Docker + Caddy Deployment |
+| 44 | #19 | Builder | GitHub App Migration -- From PAT to App Identity |
+| 45 | #16 | Builder | submit_pr_review Tool Implementation |
+| 46 | #15 | Builder | PR Review Agent -- The Second Bot |
+| 47 | -- | Critic | Batch 2 Review |
+| 48 | -- | Critic | Batch 3 Review |
+| 49 | -- | Critic | Batch 4 Review |
+| 50 | -- | Critic | Batch 5 Review |
+| 51 | -- | Critic | Batch 6 Review (or Separate Project Post-Mortem) |
+
+**Rule:** Builders MUST use their assigned entry numbers. No "next available" guessing. Critic entries are written AFTER each batch merges.
+
+---
+
+### 4. Version plan
+
+| Batch | Issues | Phase | Version after merge |
+|-------|--------|-------|-------------------|
+| 2 | #4, #32 | Phase 4 + Phase 5 | v0.4.0, then v0.5.0 |
+| 3 | #13, #14 | Phase 6 (partial) | v0.5.x patches |
+| 4 | #18 | Phase 6 (complete) | v0.6.0 |
+| 5 | #21, #19 (+#20 close) | Phase 7 | v0.7.0 |
+| 6 | #16, #15 | Phase 8 | v1.0.0 |
+
+**Merge order within Batch 2:** #4 first (v0.4.0), then #32 (v0.5.0). This preserves the phase ordering in the changelog. Even though both were developed in parallel, the version history reads Phase 4 -> Phase 5.
+
+---
+
+### 5. CLI drift check
+
+Every feature must have a corresponding CLI subcommand (Guiding Principle #4).
+
+| Feature | CLI subcommand | Status |
+|---------|---------------|--------|
+| Poll cycle | `deepagents poll` | Exists |
+| Single issue analysis | `deepagents analyze --issue N` | Exists |
+| Triage | `deepagents triage --issue N` | Exists |
+| Webhook listener | `deepagents webhook` | Exists |
+| Status | `deepagents status` | Exists |
+| **Retract** (#32) | `deepagents retract --issue N` | **NEEDS CLI** |
+| **Job queue worker** (#18) | `deepagents worker` | **NEEDS CLI** |
+| Docker/deploy (#21) | N/A (infrastructure, not a runtime command) | N/A |
+| GitHub App (#19) | N/A (config change, not a new command) | N/A |
+| PR review (#15) | `deepagents review --pr N` (or similar) | **NEEDS CLI** |
+
+**Gaps flagged:**
+1. **#32 retract** -- Builder must add `deepagents retract --issue N` subcommand to `src/cli.ts`.
+2. **#18 worker** -- If the job queue uses a separate worker process, it needs `deepagents worker` to start the dequeue loop. If the worker is embedded in the webhook server process, no new subcommand needed (but document the choice).
+3. **#15 review** -- If the reviewer bot lives in this repo, it needs a CLI entry point. If it is a separate project, it gets its own CLI.
+
+---
+
+### 6. #20 Health Check Audit
+
+**File reviewed:** `src/listener.ts:75-77`
+
+```typescript
+app.get('/health', (_req: Request, res: Response) => {
+  res.json({ status: 'ok', timestamp: new Date().toISOString() });
+});
+```
+
+**What Issue #20 asks for:** "Health check endpoint" (per ROADMAP: "Health checks for monitoring").
+
+**What already exists:** `GET /health` returns `{ status: "ok", timestamp: "..." }` with a 200 status code. This was implemented as part of #12 (webhook listener, v0.3.5).
+
+**Does this satisfy #20?** Almost. The current endpoint is minimal but functional for:
+- Docker HEALTHCHECK directives (`curl -f http://localhost:3000/health`)
+- Caddy health_check upstream probes
+- Simple uptime monitoring
+
+**What might be missing for a production health check:**
+- Database connectivity check (relevant after #18 adds PostgreSQL)
+- Memory/uptime stats
+- Version string in the response
+
+**Recommendation:** Close #20 with a note that the basic health check was shipped in #12. If richer health data is needed after #18 (database liveness), open a new issue. The current `/health` endpoint is sufficient for Phase 7's Docker HEALTHCHECK and Caddy probe. No code changes needed now.
+
+---
+
+### 7. Phase 8 scoping: same repo or separate project?
+
+The ROADMAP says: "Phase 8 -- Reviewer Bot (Separate Project). Lives in its own repo."
+
+**Analysis of the two options:**
+
+**Option A: Build #15/#16 in THIS repo first, extract later.**
+- Pros: Shares all existing infrastructure (Octokit client, tool wrappers, logging, retry, config). The `submit_pr_review` tool (#16) follows the exact same pattern as `createCommentOnIssueTool`. Copy-paste-modify.
+- Pros: The reviewer agent (#15) can reuse the `createDeepAgent` factory and model configuration.
+- Pros: Testing infrastructure already exists (vitest, mock patterns for Octokit).
+- Cons: Coupling. The reviewer bot's lifecycle (when to run, what triggers it) is different from the analyzer bot. Mixing them in one process creates operational complexity.
+- Cons: The ROADMAP envisions them as independently deployable services.
+
+**Option B: Start fresh in a new repo.**
+- Pros: Clean separation. Independent deployment, testing, and versioning.
+- Cons: Duplicates a lot of infrastructure: config loading, Octokit setup, model creation, tool wrapping, logging, retry.
+- Cons: Slower to get started -- builder must recreate the foundation.
+
+**Recommendation: Option A (build in this repo), with a clean extraction path.**
+
+Build #16 (tool) and #15 (agent) in this repo. The tool goes in `src/github-tools.ts` following existing patterns. The agent goes in `src/review-agent.ts` following the triage-agent.ts pattern. The CLI gets `deepagents review --pr N`.
+
+This keeps v1.0.0 as a milestone for THIS project. Extraction to a separate repo can happen later if operational needs demand it, but for a learning project, the pedagogical value is in seeing the full pipeline (triage -> analysis -> review) in one codebase.
+
+Mark Phase 8 in the ROADMAP as: "Built in this repo. Can be extracted to a separate deployment if needed."
+
+---
+
+### 8. Summary: execution order
+
+```
+NOW  ──► Batch 2 (#4 + #32 parallel)     ──► v0.4.0, v0.5.0
+         Close #20 (health check audit)
+     ──► Batch 3 (#13 + #14 parallel)     ──► v0.5.x patches
+     ──► Batch 4 (#18 sequential)          ──► v0.6.0
+     ──► Batch 5 (#21 + #19 parallel)      ──► v0.7.0
+     ──► Batch 6 (#16 then #15 sequential) ──► v1.0.0
+```
+
+Total: 5 batches, 10 issues, 6 version bumps, ending at v1.0.0.
+
+### What the Critic should check
+
+1. Is the #4 + #32 parallelism safe given both touch `src/core.ts`? Verify the sections don't overlap.
+2. Is the #13 dependency on #4 real? Could #13 dispatch to `runAnalyzeSingle` without the StateGraph? If yes, #13 could move to Batch 2.
+3. Is PostgreSQL (#18) the right choice for the job queue? Alternatives: SQLite (simpler), Redis (faster), or even a JSON file queue (simplest for a learning project).
+4. Are the Critic entry numbers (47-51) realistic? If batches produce fewer surprises, some Critic entries may be unnecessary.
+
+---
+
+## Entry 36: Critic's Pre-Implementation Review -- Full Roadmap Completion Plan
+
+**Date:** 2026-02-08
+**Author:** Critic Agent
+**Reviews:** Entry 35 (Architect's Full Roadmap Completion Plan)
+
+---
+
+### A. Dependency Analysis Accuracy
+
+**File-level conflicts: correctly identified.** The Architect's DAG is accurate. I verified every "touches" annotation against the actual source files.
+
+**One hidden dependency the Architect missed:**
+
+- **#32 (retract) touches `src/github-tools.ts`** to add delete/close API tools (e.g., `deleteComment`, `deleteBranch`, `closePR`). The Architect notes this in the dependency graph but does NOT flag it as a conflict zone with #4 in Batch 2. This is fine -- #4 does not touch `github-tools.ts` (it touches `agent.ts` and `core.ts`). So no actual conflict, but the Architect's Batch 2 conflict analysis only mentions `core.ts` and omits `github-tools.ts` as a #32 touchpoint. Minor documentation gap, not a blocker.
+
+**Critical path is correct:** #4 -> #13 -> #18 -> #21 -> #19 is the longest chain. #32, #14, #16, #15, and #20 are off the critical path.
+
+**VERDICT: Dependency analysis is ACCURATE. No blocking issues found.**
+
+---
+
+### B. Batch Plan Feasibility
+
+#### B1. Can #4 + #32 really run in parallel?
+
+**YES, with a minor caveat.** I verified the sections of `src/core.ts` each touches:
+
+- **#4 (analysis agent)** modifies the analysis phase: lines 538-628. Specifically, it would replace the current `createDeepAgentWithGitHub` call at line 556 and the `agent.invoke` block (lines 575-588) with a StateGraph pipeline. It may also restructure `runPollCycle` to pass triage results into the analysis phase (the HIGH finding from the Critic noted in MEMORY.md -- triage results are currently discarded before analysis).
+
+- **#32 (retract command)** adds a NEW exported function (e.g., `retractIssue(config, issueNumber)`) at the bottom of `core.ts`, after line 752. It reads `pollState.issues[N]` to get the metadata, then calls Octokit delete APIs. It also adds a new `case 'retract':` block to `src/cli.ts`.
+
+These touch different sections of `core.ts`. The Architect's assessment of "append vs. modify different sections" is correct. **Low conflict risk.** The only merge friction will be `CHANGELOG.md` and `LEARNING_LOG.md`, which are handled by the renumbering protocol.
+
+**One concern:** #4 may need to change the `IssueActions` interface or `PollState` shape (lines 37-53) to store triage results alongside action tracking. If #32 also reads `IssueActions` (to know what to retract), both builders need to agree on the interface shape. **Mitigation:** Freeze the `IssueActions` interface for Batch 2. #4 should add triage data in a SEPARATE field on `PollState`, not modify `IssueActions`. This keeps #32's read path stable.
+
+#### B2. Could #13 move earlier (Batch 2)?
+
+**YES, technically.** The `runAnalyzeSingle` function (line 633) already exists and works independently of the StateGraph. Issue #13 could wire `issues.opened` events to call `runAnalyzeSingle(config, issueNumber)` directly.
+
+**However, I do NOT recommend moving it.** Reasons:
+1. If #13 ships before #4, it would dispatch to the old analysis path. Then when #4 ships, #13's handler would need updating to use the new StateGraph pipeline. This creates rework.
+2. Batch 2 already has 2 parallel issues. Adding a third that touches `listener.ts` (which neither #4 nor #32 touch) is technically safe but increases merge coordination load for limited benefit.
+3. The Architect's sequencing (Batch 3 after #4 merges) means #13 can wire directly into the new pipeline from the start. Cleaner.
+
+**VERDICT: Keep #13 in Batch 3.** The Architect's sequencing is correct.
+
+#### B3. Is PostgreSQL appropriate for a learning project?
+
+**NO. Use SQLite instead.**
+
+The ROADMAP vision says "Docker stack (Caddy + Node + PostgreSQL)" and the Phase 7 architecture diagram shows PostgreSQL. But for a learning project:
+
+- PostgreSQL requires a running server, connection management, and migrations. This is a significant operational burden.
+- SQLite is zero-config, file-based, and sufficient for a single-process job queue.
+- The learning value of "persistent job queue" comes from the queue semantics (enqueue, dequeue, retry, dead-letter), not from the database engine.
+- If the project later needs PostgreSQL (multi-instance deployment), the migration from SQLite is straightforward -- swap the storage layer.
+- `better-sqlite3` is a well-maintained, synchronous driver that avoids async pool complexity.
+
+**Recommendation:** Change #18 from "PostgreSQL job queue" to "SQLite job queue." Update the ROADMAP accordingly. If the Architect insists on PostgreSQL for pedagogical reasons (learning Docker Compose multi-container setups), then keep it but acknowledge it adds complexity to every subsequent batch (local dev needs `docker-compose up db` or a local PostgreSQL install).
+
+**This is a CONDITIONAL finding, not a blocker.** The batch plan works with either database. The Architect should make the call.
+
+#### B4. Is the batch count (5 batches) realistic?
+
+**Yes, but Batches 5 and 6 could be consolidated.**
+
+Batch 5 (#21 Docker + #19 GitHub App) and Batch 6 (#16 tool + #15 agent) have no dependency between them. The only dependency is that #21 needs #18 (Batch 4), and #15 needs #16. If builders are available, Batch 5 and 6 could run simultaneously (4 builders in parallel). This would reduce total batches from 5 to 4.
+
+**However**, the Architect's conservative approach of 5 sequential batches is defensible. Each batch is a clean checkpoint. Consolidating adds coordination load. For a learning project, clarity over speed.
+
+**VERDICT: 5 batches is fine. Consolidation is optional optimization.**
+
+---
+
+### C. #20 Health Check Audit
+
+**Verified.** I read `src/listener.ts:75-77`. The GET `/health` endpoint exists exactly as the Architect described:
+
+```typescript
+app.get('/health', (_req: Request, res: Response) => {
+  res.json({ status: 'ok', timestamp: new Date().toISOString() });
+});
+```
+
+This returns `{ status: "ok", timestamp: "..." }` with a 200 status code. It was shipped in v0.3.5 as part of #12.
+
+**Is it sufficient to close #20?** Yes, for now. The current endpoint satisfies:
+- Docker HEALTHCHECK directives
+- Caddy upstream health probes
+- Simple uptime monitoring
+
+The Architect correctly notes that richer health data (database liveness after #18, memory/uptime stats, version string) can be a follow-up issue if needed. No code changes required.
+
+**VERDICT: APPROVE closing #20 with no code changes.**
+
+---
+
+### D. Phase 8 Scoping
+
+**I AGREE with building #15/#16 in this repo.** The Architect's reasoning is sound:
+
+1. Shared infrastructure (Octokit client, tool wrappers, logging, retry, config) avoids duplication.
+2. The `submit_pr_review` tool follows the exact pattern of `createCommentOnIssueTool` (I verified the tool factory pattern in `github-tools.ts`).
+3. The reviewer agent follows the pattern of `triage-agent.ts` (separate file, own system prompt, reuses `createDeepAgent`).
+4. For a learning project, seeing the full pipeline in one codebase is pedagogically superior.
+
+**Risks:**
+1. **Process coupling.** If the webhook listener dispatches to both analysis and review in the same process, a crash in one affects the other. Mitigation: the job queue (#18) provides isolation -- each job type runs independently.
+2. **Scope creep.** The reviewer bot could grow into a second full project within this one. Mitigation: keep the scope tight -- #16 is one tool, #15 is one agent file with one system prompt. No new infrastructure.
+3. **ROADMAP says "Separate Project."** The Architect proposes changing this. This should be documented explicitly in the ROADMAP with the rationale, not just in the LEARNING_LOG. Update Phase 8's description.
+
+**VERDICT: APPROVE building in this repo. Update ROADMAP Phase 8 description.**
+
+---
+
+### E. Version Plan
+
+**Alignment with ROADMAP verified:**
+
+| Phase | ROADMAP target | Entry 35 plan | Match? |
+|-------|---------------|---------------|--------|
+| Phase 4 | v0.4.0 | #4 -> v0.4.0 | YES |
+| Phase 5 | (no explicit target) | #32 -> v0.5.0 | REASONABLE |
+| Phase 6 | (no explicit target) | #13/#14 patches, #18 -> v0.6.0 | YES |
+| Phase 7 | (no explicit target) | #21/#19 -> v0.7.0 | YES |
+| Phase 8 | (no explicit target) | #16 patch, #15 -> v1.0.0 | YES |
+
+**One issue:** Batch 3 version plan says "#13/#14 -> v0.5.x patches." But v0.5.0 is the Phase 5 completion version (from #32 in Batch 2). So Batch 3 patches would be v0.5.1 and v0.5.2. This is correct but slightly confusing -- Phase 6 issues get Phase 5 patch numbers. This is because the minor version tracks completion order, not phase number. Acceptable but worth noting in the CHANGELOG.
+
+**VERDICT: Version plan is CORRECT.**
+
+---
+
+### F. CLI Drift
+
+**Verified the 3 gaps the Architect flagged.** All are real:
+
+1. **#32 retract** -- `src/cli.ts` has no `retract` case. The builder MUST add `case 'retract':` with `--issue N` parsing, similar to `analyze` and `triage`. Confirmed by reading `cli.ts:103-193`.
+
+2. **#18 worker** -- No `worker` subcommand exists. The Architect correctly notes this depends on the architectural choice (embedded vs. separate process). The builder should document the choice.
+
+3. **#15 review** -- No `review` subcommand exists. Builder must add `case 'review':` with `--pr N` parsing.
+
+**Additional gap found:**
+
+4. **`--skip-triage` flag** -- The `runPollCycle` function (core.ts:403) accepts `skipTriage` in options, but `cli.ts` does NOT expose a `--skip-triage` flag in the `poll` command. This is a pre-existing drift, not caused by the batch plan, but worth noting. A user cannot skip triage from the CLI even though the code supports it.
+
+**VERDICT: 3 flagged gaps are real. 1 additional pre-existing gap found.**
+
+---
+
+### G. Pre-assigned Entry Numbers
+
+**Count check:**
+- Builder entries: 36-46 = 11 entries for 10 issues (issue #4 gets 2 entries: impl + learning). Correct.
+- Critic entries: 47-51 = 5 entries for 5 batches. Correct.
+- Total: 16 entries (36-51).
+
+**But wait -- Entry 36 is THIS entry (the Critic's pre-implementation review).** The Architect assigned Entry 36 to "#4 Builder: Analysis Agent Implementation." There is a collision: Entry 36 is claimed by both this Critic review AND the #4 builder.
+
+**Resolution:** This Critic review IS Entry 36 (it is being written now). The #4 builder entries should shift to 37, 38. The #32 builder entries shift to 39, 40. All subsequent entries shift by +1. The Architect should update the table. Alternatively, the Architect intended Entries 36-51 to start AFTER this Critic entry, but the table explicitly labels Entry 36 as "#4 Builder."
+
+**Updated table (proposed):**
+
+| Entry | Issue | Author | Title |
+|-------|-------|--------|-------|
+| 36 | -- | Critic | This entry (Pre-Implementation Review) |
+| 37 | #4 | Builder | Analysis Agent Implementation |
+| 38 | #4 | Builder | StateGraph Pipeline -- Why This Design |
+| 39 | #32 | Builder | Retract Command Implementation |
+| 40 | #32 | Builder | Undo Architecture -- Design Decisions |
+| 41 | #13 | Builder | issues.opened Webhook Handler |
+| 42 | #14 | Builder | pull_request.opened Webhook Handler |
+| 43 | #18 | Builder | SQLite/PostgreSQL Job Queue |
+| 44 | #21 | Builder | Docker + Caddy Deployment |
+| 45 | #19 | Builder | GitHub App Migration |
+| 46 | #16 | Builder | submit_pr_review Tool Implementation |
+| 47 | #15 | Builder | PR Review Agent |
+| 48 | -- | Critic | Batch 2 Review |
+| 49 | -- | Critic | Batch 3 Review |
+| 50 | -- | Critic | Batch 4 Review |
+| 51 | -- | Critic | Batch 5 Review |
+| 52 | -- | Critic | Batch 6 Review (or Post-Mortem) |
+
+This shifts everything by +1 and adds Entry 52. **The Architect must update the table before Batch 2 starts.**
+
+**Are 36-52 enough?** Yes. 12 builder entries + 6 critic entries = 18 entries. Overhead entries (unexpected findings, design pivots) could use 53+. No collision risk if builders stick to assigned numbers.
+
+**VERDICT: Entry number collision found. Requires table update before Batch 2 starts.**
+
+---
+
+### H. Per-Batch Verdicts
+
+| Batch | Verdict | Conditions |
+|-------|---------|------------|
+| Batch 2 (#4 + #32) | **APPROVE** | 1. Freeze `IssueActions` interface -- #4 adds triage data in a separate PollState field. 2. Architect updates entry number table (shift +1). |
+| Batch 3 (#13 + #14) | **APPROVE** | Extract `handleEvent()` dispatcher in listener.ts to reduce merge conflict risk (as Architect suggested). |
+| Batch 4 (#18) | **APPROVE** | Architect decides SQLite vs. PostgreSQL before builder starts. Document rationale. |
+| Batch 5 (#21 + #19 + close #20) | **APPROVE** | Update ROADMAP Phase 8 description to reflect "built in this repo." |
+| Batch 6 (#16 then #15) | **APPROVE** | Keep scope tight: one tool, one agent file, one CLI subcommand. No new infrastructure. |
+
+**Overall: ALL BATCHES APPROVED with conditions noted above.**
+
+---
+
+### I. Summary of Findings That Would Change the Plan
+
+1. **Entry number collision** (Section G) -- Must fix before Batch 2. The Architect's table assigns Entry 36 to the #4 builder, but this Critic review already occupies Entry 36.
+2. **SQLite vs. PostgreSQL** (Section B3) -- Recommend SQLite. Architect should decide before Batch 4.
+3. **IssueActions interface freeze** (Section B1) -- Critical for Batch 2 parallelism. #4 must not modify the shape that #32 reads.
+4. **Pre-existing CLI gap** (Section F) -- `--skip-triage` is supported in code but not exposed in CLI. Not blocking, but should be a follow-up.
+5. **ROADMAP Phase 8 update** (Section D) -- Change "Separate Project" to "Built in this repo."
+
+None of these are plan-blockers. All are addressable with minor adjustments before the relevant batch starts.
