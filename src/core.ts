@@ -3,6 +3,7 @@ import path from 'path';
 import type { Config } from './config.js';
 import { createDeepAgentWithGitHub } from './agent.js';
 import { CircuitBreakerError, createGitHubClient } from './github-tools.js';
+import { withRetry } from './utils.js';
 import { runTriage } from './triage-agent.js';
 import type { TriageOutput } from './triage-agent.js';
 
@@ -50,6 +51,8 @@ export interface PollState {
   lastPollIssueNumbers: number[];
   /** Per-issue action tracking (added in v0.2.10). */
   issues?: Record<string, IssueActions>;
+  /** Per-issue triage results (added in v0.3.8). Passed to the analysis agent as context. */
+  triageResults?: Record<string, TriageOutput>;
 }
 
 const POLL_STATE_FILE = path.resolve('./last_poll.json');
@@ -291,6 +294,7 @@ export function buildUserMessage(
   sinceDate: string | null,
   previousIssues: number[],
   issueActions?: Record<string, IssueActions>,
+  triageResults?: Record<string, TriageOutput>,
 ): string {
   const pollingContext = sinceDate
     ? `Fetch open issues updated since ${sinceDate} (limit: ${maxIssues}) and analyze any new ones. ` +
@@ -317,7 +321,17 @@ export function buildUserMessage(
     }
   }
 
-  return pollingContext + actionContext + `
+  // Build triage context so the analysis agent knows what triage already found
+  let triageContext = '';
+  if (triageResults && Object.keys(triageResults).length > 0) {
+    const entries = Object.entries(triageResults).map(([num, t]) => {
+      const files = t.relevantFiles.length > 0 ? t.relevantFiles.join(', ') : 'none identified';
+      return `  Issue #${num}: type=${t.issueType}, complexity=${t.complexity}, relevant_files=[${files}]\n    Summary: ${t.summary}`;
+    });
+    triageContext = `\n\nTriage context (from the triage agent -- use this to guide your analysis):\n${entries.join('\n')}`;
+  }
+
+  return pollingContext + actionContext + triageContext + `
 
 For each new/updated issue:
 1. Analyze the issue
@@ -440,6 +454,10 @@ export async function runPollCycle(config: Config, options: { noSave?: boolean; 
 
   const previousIssueNumbers = pollState?.lastPollIssueNumbers ?? [];
 
+  // Triage results collected during triage phase, keyed by issue number.
+  // Passed to the analysis agent so it has context about what triage found.
+  let collectedTriageResults: Record<string, TriageOutput> = {};
+
   if (!options.skipTriage) {
     console.log('\u{1F50E} Fetching issues for triage...');
     const issues = await fetchIssuesForPoll(config, maxIssues, sinceDate);
@@ -500,6 +518,11 @@ export async function runPollCycle(config: Config, options: { noSave?: boolean; 
 
     console.log(`\n\u{1F4CA} Triage summary: ${toAnalyze.length} to analyze, ${skipped.length} skipped\n`);
 
+    // Collect triage results for issues that will be analyzed (keyed by issue number)
+    for (const r of toAnalyze) {
+      collectedTriageResults[String(r.issue.number)] = r.triage;
+    }
+
     if (toAnalyze.length === 0) {
       console.log('\u{2705} All issues were skipped by triage. Nothing to analyze.\n');
 
@@ -556,12 +579,13 @@ export async function runPollCycle(config: Config, options: { noSave?: boolean; 
   const agent = createDeepAgentWithGitHub(config, { maxIssues, dryRun: options.dryRun, maxToolCalls });
   console.log('\u{2705} Agent ready!\n');
 
-  // Build user message (include action context for partially-processed issues)
+  // Build user message (include action + triage context for the analysis agent)
   const userMessage = buildUserMessage(
     maxIssues,
     sinceDate,
     previousIssueNumbers,
     pollState?.issues,
+    collectedTriageResults,
   );
 
   // Run the agent
@@ -608,10 +632,13 @@ export async function runPollCycle(config: Config, options: { noSave?: boolean; 
   );
 
   if (!skipSave) {
+    // Merge new triage results with any existing ones from previous polls
+    const mergedTriageResults = { ...pollState?.triageResults, ...collectedTriageResults };
     savePollState({
       lastPollTimestamp: new Date().toISOString(),
       lastPollIssueNumbers: processedNumbers,
       issues: issueActions,
+      triageResults: Object.keys(mergedTriageResults).length > 0 ? mergedTriageResults : undefined,
     });
     console.log(`\n\u{1F4BE} Poll state saved to ${POLL_STATE_FILE}`);
   } else {
@@ -749,4 +776,105 @@ export function showStatus(config: Config): void {
   const maxToolCalls = getMaxToolCalls(config);
   console.log(`\nMax issues per run: ${maxIssues}`);
   console.log(`Max tool calls per run: ${maxToolCalls}`);
+}
+
+/**
+ * Result of a retraction operation. Reports what was retracted and what failed.
+ */
+export interface RetractResult {
+  issueNumber: number;
+  prClosed: boolean;
+  branchDeleted: boolean;
+  commentDeleted: boolean;
+  errors: string[];
+}
+
+/**
+ * Retract all actions taken on a specific issue: close PR, delete branch, delete comment.
+ * Order matters: close PR first (it references the branch), then delete branch, then delete comment.
+ * Partial retraction is supported -- if one step fails, the others still attempt.
+ */
+export async function retractIssue(config: Config, issueNumber: number): Promise<RetractResult> {
+  const { owner, repo, token } = config.github;
+  const octokit = createGitHubClient(token);
+
+  const pollState = loadPollState();
+  if (!pollState) {
+    throw new Error('No poll state found. Nothing to retract.');
+  }
+
+  const actions = pollState.issues?.[String(issueNumber)];
+  if (!actions) {
+    throw new Error(`No actions recorded for issue #${issueNumber}. Nothing to retract.`);
+  }
+
+  const result: RetractResult = {
+    issueNumber,
+    prClosed: false,
+    branchDeleted: false,
+    commentDeleted: false,
+    errors: [],
+  };
+
+  // Step 1: Close PR (must happen before branch deletion)
+  if (actions.pr && actions.pr.number > 0) {
+    try {
+      await withRetry(() => octokit.rest.pulls.update({
+        owner,
+        repo,
+        pull_number: actions.pr!.number,
+        state: 'closed',
+      }));
+      result.prClosed = true;
+      console.log(`  Closed PR #${actions.pr.number}`);
+    } catch (error) {
+      const msg = `Failed to close PR #${actions.pr.number}: ${error}`;
+      result.errors.push(msg);
+      console.error(`  ${msg}`);
+    }
+  }
+
+  // Step 2: Delete branch
+  if (actions.branch && actions.branch.name) {
+    try {
+      await withRetry(() => octokit.rest.git.deleteRef({
+        owner,
+        repo,
+        ref: `heads/${actions.branch!.name}`,
+      }));
+      result.branchDeleted = true;
+      console.log(`  Deleted branch ${actions.branch.name}`);
+    } catch (error) {
+      const msg = `Failed to delete branch ${actions.branch.name}: ${error}`;
+      result.errors.push(msg);
+      console.error(`  ${msg}`);
+    }
+  }
+
+  // Step 3: Delete comment
+  if (actions.comment && actions.comment.id > 0) {
+    try {
+      await withRetry(() => octokit.rest.issues.deleteComment({
+        owner,
+        repo,
+        comment_id: actions.comment!.id,
+      }));
+      result.commentDeleted = true;
+      console.log(`  Deleted comment ${actions.comment.id}`);
+    } catch (error) {
+      const msg = `Failed to delete comment ${actions.comment.id}: ${error}`;
+      result.errors.push(msg);
+      console.error(`  ${msg}`);
+    }
+  }
+
+  // Update poll state: remove the issue's actions and issue number
+  delete pollState.issues![String(issueNumber)];
+  pollState.lastPollIssueNumbers = pollState.lastPollIssueNumbers.filter(
+    (n) => n !== issueNumber,
+  );
+  savePollState(pollState);
+  console.log(`  Poll state updated (issue #${issueNumber} cleared)`);
+
+  return result;
 }

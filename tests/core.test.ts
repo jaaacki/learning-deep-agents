@@ -10,11 +10,22 @@ import {
   getMaxIssues,
   getMaxToolCalls,
   migratePollState,
+  retractIssue,
   requestShutdown,
   isShuttingDown,
   resetShutdown,
 } from '../src/core.js';
-import type { IssueActions } from '../src/core.js';
+import type { IssueActions, RetractResult, PollState } from '../src/core.js';
+import type { TriageOutput } from '../src/triage-agent.js';
+import { createGitHubClient } from '../src/github-tools.js';
+
+vi.mock('../src/github-tools.js', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('../src/github-tools.js')>();
+  return {
+    ...actual,
+    createGitHubClient: vi.fn(),
+  };
+});
 
 // ── getMaxIssues ──────────────────────────────────────────────────────────────
 
@@ -545,5 +556,324 @@ describe('graceful shutdown', () => {
     expect(isShuttingDown()).toBe(true);
     resetShutdown();
     expect(isShuttingDown()).toBe(false);
+  });
+});
+
+// ── retractIssue ──────────────────────────────────────────────────────────────
+
+describe('retractIssue', () => {
+  let mockOctokit: any;
+
+  function makePollState(issueNum: number, actions: IssueActions) {
+    return {
+      lastPollTimestamp: '2026-01-01T00:00:00Z',
+      lastPollIssueNumbers: [issueNum],
+      issues: { [String(issueNum)]: actions },
+    };
+  }
+
+  beforeEach(() => {
+    mockOctokit = {
+      rest: {
+        pulls: { update: vi.fn().mockResolvedValue({ data: {} }) },
+        git: { deleteRef: vi.fn().mockResolvedValue({ data: {} }) },
+        issues: { deleteComment: vi.fn().mockResolvedValue({ data: {} }) },
+      },
+    };
+    vi.mocked(createGitHubClient).mockReturnValue(mockOctokit as any);
+    vi.spyOn(fs, 'existsSync').mockReturnValue(true);
+    vi.spyOn(fs, 'writeFileSync').mockImplementation(() => {});
+  });
+
+  afterEach(() => {
+    vi.restoreAllMocks();
+  });
+
+  it('closes PR, deletes branch, and deletes comment for a fully-tracked issue', async () => {
+    const actions: IssueActions = {
+      comment: { id: 100, html_url: 'https://c' },
+      branch: { name: 'issue-42-fix', sha: 'abc' },
+      commits: [{ path: 'f.ts', sha: 'fs', commit_sha: 'cs' }],
+      pr: { number: 10, html_url: 'https://pr' },
+    };
+    vi.spyOn(fs, 'readFileSync').mockReturnValue(JSON.stringify(makePollState(42, actions)));
+
+    const config = { github: { owner: 'o', repo: 'r', token: 't' } } as any;
+    const result = await retractIssue(config, 42);
+
+    expect(result.prClosed).toBe(true);
+    expect(result.branchDeleted).toBe(true);
+    expect(result.commentDeleted).toBe(true);
+    expect(result.errors).toHaveLength(0);
+
+    expect(mockOctokit.rest.pulls.update).toHaveBeenCalledWith({
+      owner: 'o', repo: 'r', pull_number: 10, state: 'closed',
+    });
+    expect(mockOctokit.rest.git.deleteRef).toHaveBeenCalledWith({
+      owner: 'o', repo: 'r', ref: 'heads/issue-42-fix',
+    });
+    expect(mockOctokit.rest.issues.deleteComment).toHaveBeenCalledWith({
+      owner: 'o', repo: 'r', comment_id: 100,
+    });
+
+    // Verify poll state was saved with the issue removed
+    const savedState = JSON.parse((vi.mocked(fs.writeFileSync).mock.calls[0][1] as string));
+    expect(savedState.issues['42']).toBeUndefined();
+    expect(savedState.lastPollIssueNumbers).not.toContain(42);
+  });
+
+  it('throws when no poll state exists', async () => {
+    vi.spyOn(fs, 'existsSync').mockReturnValue(false);
+    const config = { github: { owner: 'o', repo: 'r', token: 't' } } as any;
+    await expect(retractIssue(config, 42)).rejects.toThrow('No poll state found');
+  });
+
+  it('throws when issue has no recorded actions', async () => {
+    const state = {
+      lastPollTimestamp: '2026-01-01T00:00:00Z',
+      lastPollIssueNumbers: [1],
+      issues: { '1': { comment: null, branch: null, commits: [], pr: null } },
+    };
+    vi.spyOn(fs, 'readFileSync').mockReturnValue(JSON.stringify(state));
+
+    const config = { github: { owner: 'o', repo: 'r', token: 't' } } as any;
+    await expect(retractIssue(config, 99)).rejects.toThrow('No actions recorded for issue #99');
+  });
+
+  it('handles partial retraction when only a PR exists (no branch, no comment)', async () => {
+    const actions: IssueActions = {
+      comment: null,
+      branch: null,
+      commits: [],
+      pr: { number: 5, html_url: 'https://pr' },
+    };
+    vi.spyOn(fs, 'readFileSync').mockReturnValue(JSON.stringify(makePollState(7, actions)));
+
+    const config = { github: { owner: 'o', repo: 'r', token: 't' } } as any;
+    const result = await retractIssue(config, 7);
+
+    expect(result.prClosed).toBe(true);
+    expect(result.branchDeleted).toBe(false);
+    expect(result.commentDeleted).toBe(false);
+    expect(result.errors).toHaveLength(0);
+
+    expect(mockOctokit.rest.git.deleteRef).not.toHaveBeenCalled();
+    expect(mockOctokit.rest.issues.deleteComment).not.toHaveBeenCalled();
+  });
+
+  it('handles partial retraction when only a comment exists', async () => {
+    const actions: IssueActions = {
+      comment: { id: 200, html_url: 'https://c' },
+      branch: null,
+      commits: [],
+      pr: null,
+    };
+    vi.spyOn(fs, 'readFileSync').mockReturnValue(JSON.stringify(makePollState(3, actions)));
+
+    const config = { github: { owner: 'o', repo: 'r', token: 't' } } as any;
+    const result = await retractIssue(config, 3);
+
+    expect(result.prClosed).toBe(false);
+    expect(result.branchDeleted).toBe(false);
+    expect(result.commentDeleted).toBe(true);
+    expect(result.errors).toHaveLength(0);
+  });
+
+  it('reports errors but continues retraction when PR close fails', async () => {
+    const actions: IssueActions = {
+      comment: { id: 100, html_url: 'https://c' },
+      branch: { name: 'issue-5-fix', sha: 'abc' },
+      commits: [],
+      pr: { number: 10, html_url: 'https://pr' },
+    };
+    vi.spyOn(fs, 'readFileSync').mockReturnValue(JSON.stringify(makePollState(5, actions)));
+    mockOctokit.rest.pulls.update.mockRejectedValue(new Error('PR not found'));
+
+    const config = { github: { owner: 'o', repo: 'r', token: 't' } } as any;
+    const result = await retractIssue(config, 5);
+
+    expect(result.prClosed).toBe(false);
+    expect(result.branchDeleted).toBe(true);
+    expect(result.commentDeleted).toBe(true);
+    expect(result.errors).toHaveLength(1);
+    expect(result.errors[0]).toContain('Failed to close PR');
+  });
+
+  it('skips actions with zero/empty IDs (migrated from old format)', async () => {
+    const actions: IssueActions = {
+      comment: { id: 0, html_url: '' },
+      branch: { name: 'issue-1-fix', sha: '' },
+      commits: [],
+      pr: { number: 0, html_url: '' },
+    };
+    vi.spyOn(fs, 'readFileSync').mockReturnValue(JSON.stringify(makePollState(1, actions)));
+
+    const config = { github: { owner: 'o', repo: 'r', token: 't' } } as any;
+    const result = await retractIssue(config, 1);
+
+    // PR with number 0 should be skipped
+    expect(result.prClosed).toBe(false);
+    expect(mockOctokit.rest.pulls.update).not.toHaveBeenCalled();
+    // Branch with name should still be deleted (name is meaningful even without SHA)
+    expect(result.branchDeleted).toBe(true);
+    // Comment with id 0 should be skipped
+    expect(result.commentDeleted).toBe(false);
+    expect(mockOctokit.rest.issues.deleteComment).not.toHaveBeenCalled();
+  });
+});
+
+// ── buildUserMessage with triage context (triage-to-analysis handoff) ────────
+
+describe('buildUserMessage with triageResults', () => {
+  const sampleTriage: TriageOutput = {
+    issueType: 'bug',
+    complexity: 'moderate',
+    relevantFiles: ['src/core.ts', 'src/agent.ts'],
+    shouldAnalyze: true,
+    summary: 'A null pointer bug in the poll cycle when state is missing.',
+  };
+
+  it('includes triage context header when triageResults are provided', () => {
+    const triage: Record<string, TriageOutput> = { '42': sampleTriage };
+    const msg = buildUserMessage(5, null, [], undefined, triage);
+    expect(msg).toContain('Triage context');
+  });
+
+  it('includes issue number from triage results', () => {
+    const triage: Record<string, TriageOutput> = { '42': sampleTriage };
+    const msg = buildUserMessage(5, null, [], undefined, triage);
+    expect(msg).toContain('Issue #42');
+  });
+
+  it('includes issue type from triage', () => {
+    const triage: Record<string, TriageOutput> = { '42': sampleTriage };
+    const msg = buildUserMessage(5, null, [], undefined, triage);
+    expect(msg).toContain('type=bug');
+  });
+
+  it('includes complexity from triage', () => {
+    const triage: Record<string, TriageOutput> = { '42': sampleTriage };
+    const msg = buildUserMessage(5, null, [], undefined, triage);
+    expect(msg).toContain('complexity=moderate');
+  });
+
+  it('includes relevant files from triage', () => {
+    const triage: Record<string, TriageOutput> = { '42': sampleTriage };
+    const msg = buildUserMessage(5, null, [], undefined, triage);
+    expect(msg).toContain('src/core.ts');
+    expect(msg).toContain('src/agent.ts');
+  });
+
+  it('includes triage summary', () => {
+    const triage: Record<string, TriageOutput> = { '42': sampleTriage };
+    const msg = buildUserMessage(5, null, [], undefined, triage);
+    expect(msg).toContain('null pointer bug');
+  });
+
+  it('shows "none identified" when triage has no relevant files', () => {
+    const noFiles: TriageOutput = { ...sampleTriage, relevantFiles: [] };
+    const triage: Record<string, TriageOutput> = { '7': noFiles };
+    const msg = buildUserMessage(5, null, [], undefined, triage);
+    expect(msg).toContain('none identified');
+  });
+
+  it('includes multiple triage results for multiple issues', () => {
+    const triage: Record<string, TriageOutput> = {
+      '10': { ...sampleTriage, issueType: 'feature', summary: 'Add new endpoint' },
+      '11': { ...sampleTriage, issueType: 'docs', summary: 'Update README' },
+    };
+    const msg = buildUserMessage(5, null, [], undefined, triage);
+    expect(msg).toContain('Issue #10');
+    expect(msg).toContain('Issue #11');
+    expect(msg).toContain('type=feature');
+    expect(msg).toContain('type=docs');
+  });
+
+  it('does not include triage section when triageResults is undefined', () => {
+    const msg = buildUserMessage(5, null, []);
+    expect(msg).not.toContain('Triage context');
+  });
+
+  it('does not include triage section when triageResults is empty', () => {
+    const msg = buildUserMessage(5, null, [], undefined, {});
+    expect(msg).not.toContain('Triage context');
+  });
+
+  it('combines action context and triage context together', () => {
+    const actions: Record<string, IssueActions> = {
+      '5': { comment: { id: 1, html_url: 'u' }, branch: null, commits: [], pr: null },
+    };
+    const triage: Record<string, TriageOutput> = { '42': sampleTriage };
+    const msg = buildUserMessage(5, '2026-01-01T00:00:00Z', [5], actions, triage);
+    // Both sections present
+    expect(msg).toContain('Partially-processed');
+    expect(msg).toContain('Triage context');
+    // Action context for issue 5
+    expect(msg).toContain('Issue #5');
+    // Triage context for issue 42
+    expect(msg).toContain('Issue #42');
+    expect(msg).toContain('type=bug');
+  });
+
+  it('still includes workflow instructions when triage context is present', () => {
+    const triage: Record<string, TriageOutput> = { '42': sampleTriage };
+    const msg = buildUserMessage(5, null, [], undefined, triage);
+    expect(msg).toContain('comment_on_issue');
+    expect(msg).toContain('create_branch');
+    expect(msg).toContain('write_todos');
+  });
+});
+
+// ── PollState triageResults field ────────────────────────────────────────────
+
+describe('PollState triageResults field', () => {
+  it('savePollState persists triageResults when provided', () => {
+    vi.spyOn(fs, 'writeFileSync').mockImplementation(() => {});
+
+    const triage: Record<string, TriageOutput> = {
+      '1': {
+        issueType: 'bug',
+        complexity: 'simple',
+        relevantFiles: ['src/index.ts'],
+        shouldAnalyze: true,
+        summary: 'Simple bug fix.',
+      },
+    };
+    const state: PollState = {
+      lastPollTimestamp: '2026-02-08T12:00:00Z',
+      lastPollIssueNumbers: [1],
+      issues: {},
+      triageResults: triage,
+    };
+    savePollState(state);
+    const [, content] = vi.mocked(fs.writeFileSync).mock.calls[0];
+    const parsed = JSON.parse(content as string);
+    expect(parsed.triageResults).toBeDefined();
+    expect(parsed.triageResults['1'].issueType).toBe('bug');
+    expect(parsed.triageResults['1'].relevantFiles).toEqual(['src/index.ts']);
+
+    vi.restoreAllMocks();
+  });
+
+  it('migratePollState preserves triageResults in enriched format', () => {
+    const state = {
+      lastPollTimestamp: '2026-01-01T00:00:00Z',
+      lastPollIssueNumbers: [1],
+      issues: {
+        '1': { comment: null, branch: null, commits: [], pr: null },
+      },
+      triageResults: {
+        '1': {
+          issueType: 'feature',
+          complexity: 'complex',
+          relevantFiles: [],
+          shouldAnalyze: true,
+          summary: 'New feature.',
+        },
+      },
+    };
+    const result = migratePollState(state);
+    expect(result.triageResults).toBeDefined();
+    expect(result.triageResults!['1'].issueType).toBe('feature');
   });
 });

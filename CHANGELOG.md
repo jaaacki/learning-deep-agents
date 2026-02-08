@@ -9,6 +9,34 @@
 
 ---
 
+## v0.3.9 — 2026-02-08
+
+### Added
+- **Retract command** (Issue #32) — `deepagents retract --issue N` undoes all agent actions on an issue
+- `retractIssue()` function in `src/core.ts`: closes PR, deletes branch, deletes comment (in that order)
+- Uses enriched metadata from v0.3.7 (#31) to find PR numbers, branch names, and comment IDs
+- Partial retraction: if one step fails, the remaining steps still execute
+- Skips actions with zero/empty IDs (safe for migrated old-format state)
+- Poll state updated after retraction: issue cleared from `issues` map and `lastPollIssueNumbers`
+- `deepagents retract --issue N` CLI subcommand with summary output
+- `RetractResult` interface exported for programmatic use
+- 7 new unit tests covering: full retraction, missing state, missing issue, partial retraction, error handling, migrated-format safety
+
+---
+
+## v0.3.8 — 2026-02-08
+
+### Changed
+- **Triage-to-analysis handoff** (Issue #4) — triage results are now passed to the analysis agent as context
+- `buildUserMessage()` accepts optional `triageResults` parameter (5th argument)
+- When triage context is available, the user message includes issue type, complexity, relevant files, and summary
+- `PollState` gains optional `triageResults` field to persist triage data across runs
+- `runPollCycle()` collects triage results and passes them to `buildUserMessage()`, also saves them in poll state
+- System prompt in `agent.ts` updated to instruct the agent to use triage context (skip `list_repo_files` when triage already identified relevant files)
+- 13 new tests for triage-to-analysis handoff in `tests/core.test.ts`
+
+---
+
 ## v0.3.7 — 2026-02-08
 
 ### Changed

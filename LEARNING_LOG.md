@@ -5084,3 +5084,85 @@ This shifts everything by +1 and adds Entry 52. **The Architect must update the 
 5. **ROADMAP Phase 8 update** (Section D) -- Change "Separate Project" to "Built in this repo."
 
 None of these are plan-blockers. All are addressable with minor adjustments before the relevant batch starts.
+
+---
+
+## Entry 37: Triage-to-Analysis Handoff -- Wiring the Two-Phase Pipeline (Issue #4)
+
+**Date:** 2026-02-08
+**Author:** Builder Agent
+**Issue:** #4
+
+### The problem
+
+The triage agent (#3, Entry 25) pre-filters issues and produces structured output: issue type, complexity, relevant files, and a summary. But this output was discarded before the analysis agent started. The analysis agent received a generic user message with no triage context, forcing it to redo work the triage agent already did (listing files, classifying the issue).
+
+This was flagged as a HIGH severity gap by the Critic (see MEMORY.md: "Triage results not passed to analysis agent").
+
+### What was built
+
+1. **`buildUserMessage()` now accepts a 5th parameter: `triageResults`** -- a `Record<string, TriageOutput>` keyed by issue number. When present, the user message includes a "Triage context" section with issue type, complexity, relevant files, and summary for each issue.
+
+2. **`runPollCycle()` wiring** -- triage results collected during the triage phase are now hoisted into a `collectedTriageResults` variable that survives the triage block's scope. After filtering, the results for issues that will be analyzed are collected and passed to `buildUserMessage()`.
+
+3. **`PollState.triageResults`** -- a new optional field that persists triage results across runs. This allows the analysis agent to have triage context even if a previous run triaged issues but didn't complete analysis (e.g., circuit breaker or shutdown).
+
+4. **System prompt update** -- the analysis agent's system prompt now instructs it to use triage context when available: skip `list_repo_files` if triage already identified relevant files, use the triage summary for initial scoping.
+
+### Why this design
+
+**Passing triage via the user message (not a separate state graph channel):**
+
+The current architecture uses a single `agent.invoke()` call with a user message. Adding triage context as part of the user message is the minimal change that closes the gap without requiring a StateGraph refactor. The triage output is small (a few fields per issue), so including it in the prompt is cheap. A StateGraph pipeline (mentioned in the issue title) is a larger architectural change that can be built on top of this wiring later.
+
+**Separate `triageResults` field instead of embedding in `IssueActions`:**
+
+The Critic and Architect both noted that `IssueActions` must not be modified (it's #32's territory for retraction). `triageResults` is a separate field on `PollState`, keyed by issue number, with `TriageOutput` values. This keeps the two concerns cleanly separated.
+
+**Conservative system prompt guidance:**
+
+The prompt says "if triage context is provided" rather than assuming it always exists. This handles: (a) first run with no triage, (b) `--skip-triage` mode, (c) backward compatibility with older poll state files.
+
+---
+
+## Entry 38: Retract Command Implementation
+
+**Date:** 2026-02-08
+**Author:** Builder Agent
+**Issue:** #32
+
+### What was built
+
+The `deepagents retract --issue N` CLI command undoes all actions the agent previously took on a GitHub issue. It uses the enriched metadata from v0.3.7 (#31) to find the exact PR number, branch name, and comment ID, then calls GitHub's API to close/delete each one.
+
+### Design decisions
+
+**1. Ordering: PR first, then branch, then comment.**
+
+The PR references the branch. If we delete the branch first, GitHub may behave unexpectedly when we try to close the PR (the branch it points to is gone). Closing the PR first is cleanest -- GitHub marks it as closed, then we can safely delete the branch. The comment is independent and goes last.
+
+**2. Partial retraction over all-or-nothing.**
+
+If closing the PR fails (e.g., it was already closed manually), we still try to delete the branch and comment. The `RetractResult` reports what succeeded and what failed, along with error messages. This is more useful than aborting on the first failure -- the operator can see exactly what state was left behind.
+
+**3. No new GitHub tools in github-tools.ts.**
+
+The retract function uses Octokit directly (via `createGitHubClient`) rather than creating new LangChain tools. Why? The retract operation is a CLI-driven, human-invoked command -- the LLM agent never calls it. LangChain tool wrappers (with Zod schemas and descriptions) exist so the agent can discover and call them. Retract has no agent-facing surface, so wrapping it as a tool would be unnecessary ceremony.
+
+**4. Skipping zero/empty IDs.**
+
+Old poll state (migrated from pre-v0.3.7 format) has placeholder values: `comment.id = 0`, `pr.number = 0`. These mean "we know a comment/PR existed but we don't have the real ID." Trying to delete comment ID 0 or close PR #0 would hit GitHub's API with invalid requests. The retract function checks for these sentinel values and skips them.
+
+**5. Clearing poll state after retraction.**
+
+After retraction, the issue is removed from both `pollState.issues` (action tracking) and `pollState.lastPollIssueNumbers` (processed list). This means the next poll run will pick up the issue again if it's still open -- which is exactly the right behavior for "undo and redo."
+
+### Testing approach
+
+Seven tests cover the key scenarios: full retraction (all 3 actions), no poll state, missing issue in state, partial retraction (PR only, comment only), error recovery (PR close fails but branch and comment still succeed), and migrated-format safety (zero IDs are skipped). The mock pattern uses `vi.mock` to intercept `createGitHubClient` from `github-tools.ts`, which is a new pattern in this codebase -- previous tests mocked Octokit directly because tools accepted it as a parameter.
+
+### What the Critic should check
+
+1. Should retraction also delete the local `./issues/issue_N.md` file? Currently it only retracts GitHub-side artifacts. The local file is left behind.
+2. The `withRetry()` wrapper retries on 5xx/429 errors. For delete operations, is retrying safe? (Yes -- deletes are idempotent, and GitHub returns 404 for already-deleted resources, which `withRetry` does not retry on.)
+3. Should there be a `--dry-run` flag for retract? Currently there is no dry-run mode for retraction.
