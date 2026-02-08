@@ -166,6 +166,49 @@ describe('loadConfig', () => {
     expect(config.triageLlm.provider).toBe('ollama');
   });
 
+  // ── reviewerLlm config validation ────────────────────────────────────────
+
+  it('accepts config with reviewerLlm specified', () => {
+    const reviewerConfig = {
+      ...validConfig,
+      reviewerLlm: { provider: 'openai', apiKey: 'sk-openai-test', model: 'gpt-4' },
+    };
+    vi.mocked(fs.existsSync).mockReturnValue(true);
+    vi.mocked(fs.readFileSync).mockReturnValue(JSON.stringify(reviewerConfig));
+
+    const config = loadConfig();
+    expect(config.reviewerLlm.provider).toBe('openai');
+    expect(config.reviewerLlm.model).toBe('gpt-4');
+  });
+
+  it('exits when reviewerLlm.provider is missing', () => {
+    const bad = {
+      ...validConfig,
+      reviewerLlm: { provider: '', apiKey: 'sk-test', model: 'gpt-4' },
+    };
+    vi.mocked(fs.existsSync).mockReturnValue(true);
+    vi.mocked(fs.readFileSync).mockReturnValue(JSON.stringify(bad));
+
+    expect(() => loadConfig()).toThrow('process.exit');
+    expect(console.error).toHaveBeenCalledWith(
+      expect.stringContaining('reviewerLlm.provider is required')
+    );
+  });
+
+  it('exits when reviewerLlm API key is missing for cloud providers', () => {
+    const bad = {
+      ...validConfig,
+      reviewerLlm: { provider: 'anthropic', apiKey: '', model: 'claude-sonnet' },
+    };
+    vi.mocked(fs.existsSync).mockReturnValue(true);
+    vi.mocked(fs.readFileSync).mockReturnValue(JSON.stringify(bad));
+
+    expect(() => loadConfig()).toThrow('process.exit');
+    expect(console.error).toHaveBeenCalledWith(
+      expect.stringContaining('Missing reviewerLlm API key')
+    );
+  });
+
   // ── webhook config validation ──────────────────────────────────────────────
 
   it('accepts config with valid webhook section', () => {
