@@ -1,4 +1,6 @@
 import { Octokit } from 'octokit';
+import { createAppAuth } from '@octokit/auth-app';
+import fs from 'fs';
 import { tool } from 'langchain';
 import { z } from 'zod';
 import { withRetry } from './utils.js';
@@ -57,11 +59,51 @@ export function wrapWithCircuitBreaker<T extends ReturnType<typeof tool>>(
   return wrappedTool;
 }
 
+// ── Auth helpers ─────────────────────────────────────────────────────────────
+
 /**
- * Create GitHub API client
+ * GitHub App auth config (alternative to PAT).
  */
-export function createGitHubClient(token: string) {
-  return new Octokit({ auth: token });
+export interface GitHubAppAuth {
+  appId: number;
+  privateKeyPath: string;
+  installationId: number;
+}
+
+/**
+ * Extract the auth parameter from a config's github section.
+ * Returns a PAT string or GitHubAppAuth object, depending on what's configured.
+ */
+export function getAuthFromConfig(githubConfig: { token?: string; appId?: number; privateKeyPath?: string; installationId?: number }): string | GitHubAppAuth {
+  if (githubConfig.appId && githubConfig.privateKeyPath && githubConfig.installationId) {
+    return {
+      appId: githubConfig.appId,
+      privateKeyPath: githubConfig.privateKeyPath,
+      installationId: githubConfig.installationId,
+    };
+  }
+  return githubConfig.token!;
+}
+
+/**
+ * Create GitHub API client.
+ * Accepts either a PAT string or GitHub App auth config.
+ * When App auth is provided, uses @octokit/auth-app to generate installation tokens.
+ */
+export function createGitHubClient(auth: string | GitHubAppAuth) {
+  if (typeof auth === 'string') {
+    return new Octokit({ auth });
+  }
+
+  const privateKey = fs.readFileSync(auth.privateKeyPath, 'utf-8');
+  return new Octokit({
+    authStrategy: createAppAuth,
+    auth: {
+      appId: auth.appId,
+      privateKey,
+      installationId: auth.installationId,
+    },
+  });
 }
 
 /**

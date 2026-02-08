@@ -59,12 +59,15 @@ describe('loadConfig', () => {
     );
   });
 
-  it('exits when github.token is missing', () => {
+  it('exits when github.token is missing and no app fields', () => {
     const bad = { ...validConfig, github: { ...validConfig.github, token: '' } };
     vi.mocked(fs.existsSync).mockReturnValue(true);
     vi.mocked(fs.readFileSync).mockReturnValue(JSON.stringify(bad));
 
     expect(() => loadConfig()).toThrow('process.exit');
+    expect(console.error).toHaveBeenCalledWith(
+      expect.stringContaining('Missing GitHub auth')
+    );
   });
 
   it('exits when LLM API key is missing for cloud providers', () => {
@@ -226,5 +229,117 @@ describe('loadConfig', () => {
     expect(console.error).toHaveBeenCalledWith(
       expect.stringContaining('webhook.secret is required')
     );
+  });
+
+  // ── GitHub App auth validation ──────────────────────────────────────────────
+
+  it('accepts config with only GitHub App fields (no PAT)', () => {
+    const appConfig = {
+      github: {
+        owner: 'test-owner',
+        repo: 'test-repo',
+        appId: 12345,
+        privateKeyPath: '/tmp/test-key.pem',
+        installationId: 67890,
+      },
+      llm: { provider: 'anthropic', apiKey: 'sk-ant-test', model: 'claude-sonnet-4-20250514' },
+    };
+    vi.mocked(fs.existsSync).mockReturnValue(true);
+    vi.mocked(fs.readFileSync).mockReturnValue(JSON.stringify(appConfig));
+
+    const config = loadConfig();
+    expect(config.github.appId).toBe(12345);
+    expect(config.github.installationId).toBe(67890);
+  });
+
+  it('accepts config with PAT (backwards-compatible, no app fields)', () => {
+    vi.mocked(fs.existsSync).mockReturnValue(true);
+    vi.mocked(fs.readFileSync).mockReturnValue(JSON.stringify(validConfig));
+
+    const config = loadConfig();
+    expect(config.github.token).toBe('ghp_test123');
+  });
+
+  it('exits when neither PAT nor App fields are provided', () => {
+    const bad = {
+      github: { owner: 'test-owner', repo: 'test-repo' },
+      llm: { provider: 'anthropic', apiKey: 'sk-ant-test', model: 'claude-sonnet-4-20250514' },
+    };
+    vi.mocked(fs.existsSync).mockReturnValue(true);
+    vi.mocked(fs.readFileSync).mockReturnValue(JSON.stringify(bad));
+
+    expect(() => loadConfig()).toThrow('process.exit');
+    expect(console.error).toHaveBeenCalledWith(
+      expect.stringContaining('Missing GitHub auth')
+    );
+  });
+
+  it('exits when partial App fields provided (appId but no privateKeyPath)', () => {
+    const bad = {
+      github: { owner: 'test-owner', repo: 'test-repo', appId: 12345 },
+      llm: { provider: 'anthropic', apiKey: 'sk-ant-test', model: 'claude-sonnet-4-20250514' },
+    };
+    vi.mocked(fs.existsSync).mockReturnValue(true);
+    vi.mocked(fs.readFileSync).mockReturnValue(JSON.stringify(bad));
+
+    expect(() => loadConfig()).toThrow('process.exit');
+    expect(console.error).toHaveBeenCalledWith(
+      expect.stringContaining('Incomplete GitHub App config')
+    );
+  });
+
+  it('exits when partial App fields provided (appId + privateKeyPath but no installationId)', () => {
+    const bad = {
+      github: { owner: 'test-owner', repo: 'test-repo', appId: 12345, privateKeyPath: '/tmp/key.pem' },
+      llm: { provider: 'anthropic', apiKey: 'sk-ant-test', model: 'claude-sonnet-4-20250514' },
+    };
+    vi.mocked(fs.existsSync).mockReturnValue(true);
+    vi.mocked(fs.readFileSync).mockReturnValue(JSON.stringify(bad));
+
+    expect(() => loadConfig()).toThrow('process.exit');
+    expect(console.error).toHaveBeenCalledWith(
+      expect.stringContaining('Incomplete GitHub App config')
+    );
+  });
+
+  it('exits when App private key file does not exist', () => {
+    const bad = {
+      github: {
+        owner: 'test-owner',
+        repo: 'test-repo',
+        appId: 12345,
+        privateKeyPath: '/nonexistent/key.pem',
+        installationId: 67890,
+      },
+      llm: { provider: 'anthropic', apiKey: 'sk-ant-test', model: 'claude-sonnet-4-20250514' },
+    };
+    // First call: config.json exists, second call: private key does not
+    vi.mocked(fs.existsSync).mockReturnValueOnce(true).mockReturnValueOnce(false);
+    vi.mocked(fs.readFileSync).mockReturnValue(JSON.stringify(bad));
+
+    expect(() => loadConfig()).toThrow('process.exit');
+    expect(console.error).toHaveBeenCalledWith(
+      expect.stringContaining('private key file not found')
+    );
+  });
+
+  it('accepts config with both PAT and App fields (PAT takes precedence via hasToken)', () => {
+    const bothConfig = {
+      github: {
+        owner: 'test-owner',
+        repo: 'test-repo',
+        token: 'ghp_test123',
+        appId: 12345,
+        privateKeyPath: '/tmp/key.pem',
+        installationId: 67890,
+      },
+      llm: { provider: 'anthropic', apiKey: 'sk-ant-test', model: 'claude-sonnet-4-20250514' },
+    };
+    vi.mocked(fs.existsSync).mockReturnValue(true);
+    vi.mocked(fs.readFileSync).mockReturnValue(JSON.stringify(bothConfig));
+
+    // Should not throw -- both are valid, PAT is present so no validation of app fields needed
+    const config = loadConfig();
+    expect(config.github.token).toBe('ghp_test123');
   });
 });

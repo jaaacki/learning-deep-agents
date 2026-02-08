@@ -3,6 +3,7 @@ import type { Config } from './config.js';
 import { createModel } from './model.js';
 import {
   createGitHubClient,
+  getAuthFromConfig,
   createGitHubIssuesTool,
   createListRepoFilesTool,
   createReadRepoFileTool,
@@ -113,8 +114,8 @@ export function createTriageAgent(config: Config, options: { maxToolCalls?: numb
     : config;
   const model = createModel(modelConfig);
 
-  const { owner, repo, token } = config.github;
-  const octokit = createGitHubClient(token);
+  const { owner, repo } = config.github;
+  const octokit = createGitHubClient(getAuthFromConfig(config.github));
 
   // Read-only tools only -- no side effects
   let githubIssuesTool = createGitHubIssuesTool(owner, repo, octokit);

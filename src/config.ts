@@ -14,10 +14,35 @@ export function loadConfig() {
   const configFile = fs.readFileSync(configPath, 'utf-8');
   const config = JSON.parse(configFile);
 
-  // Validate required fields
-  if (!config.github.owner || !config.github.repo || !config.github.token) {
-    console.error('❌ Missing required GitHub config: owner, repo, token');
+  // Validate required fields: owner and repo are always required
+  if (!config.github.owner || !config.github.repo) {
+    console.error('❌ Missing required GitHub config: owner, repo');
     process.exit(1);
+  }
+
+  // Auth: either PAT (token) or GitHub App (appId + privateKeyPath + installationId)
+  const hasToken = !!config.github.token;
+  const hasAppId = typeof config.github.appId === 'number';
+  const hasPrivateKeyPath = !!config.github.privateKeyPath;
+  const hasInstallationId = typeof config.github.installationId === 'number';
+  const appFieldCount = [hasAppId, hasPrivateKeyPath, hasInstallationId].filter(Boolean).length;
+
+  if (!hasToken && appFieldCount === 0) {
+    console.error('❌ Missing GitHub auth: provide either token (PAT) or appId + privateKeyPath + installationId (GitHub App)');
+    process.exit(1);
+  }
+
+  if (!hasToken && appFieldCount > 0 && appFieldCount < 3) {
+    console.error('❌ Incomplete GitHub App config: all three fields required (appId, privateKeyPath, installationId)');
+    process.exit(1);
+  }
+
+  if (!hasToken && appFieldCount === 3) {
+    // Validate that the private key file exists
+    if (!fs.existsSync(config.github.privateKeyPath)) {
+      console.error(`❌ GitHub App private key file not found: ${config.github.privateKeyPath}`);
+      process.exit(1);
+    }
   }
 
   // API key is required for cloud providers, optional for local (ollama, openai-compatible)

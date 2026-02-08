@@ -100,17 +100,17 @@ An autonomous bot that watches a GitHub repository, analyzes new issues with AI,
 
 ---
 
-## Phase 7 — Deployment
+## Phase 7 — Deployment ✓ (v0.7.0)
 
 > Production-ready Docker stack with proper identity and monitoring.
 
 | # | Issue | Status |
 |---|-------|--------|
-| [#21](../../issues/21) | Docker + Caddy deployment setup | Open |
-| [#20](../../issues/20) | Health check endpoint | Open |
-| [#19](../../issues/19) | Migrate from PAT to GitHub App | Open |
+| [#21](../../issues/21) | Docker + Caddy deployment setup | ✓ v0.7.0 |
+| [#20](../../issues/20) | Health check endpoint | ✓ (via listener.ts GET /health) |
+| [#19](../../issues/19) | Migrate from PAT to GitHub App | ✓ v0.7.0 |
 
-**Milestone:** Three-container stack (Caddy + Node + PostgreSQL). Bot has its own GitHub App identity. Health checks for monitoring.
+**Milestone:** Two-container stack (Caddy + Node). Bot supports GitHub App identity. Health checks for monitoring.
 
 **Architecture:**
 ```

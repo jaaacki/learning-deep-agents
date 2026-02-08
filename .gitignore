@@ -5,3 +5,4 @@ poll.log
 poll.lock/
 .claude/
 CLAUDE.md
+*.pem
