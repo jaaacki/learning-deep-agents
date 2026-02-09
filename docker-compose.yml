@@ -3,12 +3,14 @@ services:
     build: .
     container_name: deepagents-bot
     restart: unless-stopped
+    env_file: .env
     expose:
       - "3000"
     volumes:
-      - ./config.json:/app/config.json:ro
+      # - ./config.json:/app/config.json:ro   # optional fallback — env vars are preferred
       - ./last_poll.json:/app/last_poll.json
       - ./issues:/app/issues
+      - ${GITHUB_APP_PEM_PATH:-./app.pem}:/app/app.pem:ro
     healthcheck:
       test: ["CMD", "node", "-e", "fetch('http://localhost:3000/health').then(r=>{if(!r.ok)throw r.status}).catch(()=>process.exit(1))"]
       interval: 30s
@@ -17,14 +19,17 @@ services:
       retries: 3
 
   caddy:
-    image: caddy:2
+    build:
+      context: .
+      dockerfile: Dockerfile.caddy
     container_name: deepagents-caddy
     restart: unless-stopped
+    env_file: .env
     ports:
       - "80:80"
       - "443:443"
     volumes:
-      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - ./Caddyfile.example:/etc/caddy/Caddyfile:ro
       - caddy_data:/data
       - caddy_config:/config
     depends_on:

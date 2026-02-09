@@ -5460,3 +5460,55 @@ The system prompt asks it to: read the diff, read relevant files, evaluate the a
 - `listener.ts`: `handlePullRequestEvent()` now async, calls reviewer instead of logging stub
 - `cli.ts`: New `review --pr N` subcommand
 - 12 new tests for the tools, 2 updated listener tests for reviewer integration
+
+## Entry 45: Consolidating Config into .env -- Single Source of Truth (Issue #47)
+
+**Date:** 2026-02-09
+**Author:** Architect Agent
+**Issue:** #47 -- Consolidate config into `.env`
+
+### The problem: three files, three places for secrets
+
+After v1.0.0, a real setup session exposed several pain points:
+
+1. **Secrets scattered everywhere.** GitHub token in `config.json`, Cloudflare token in `.env`, domain name in a user-created `Caddyfile`. Three files, three places to make mistakes.
+2. **`triageLlm`/`reviewerLlm` shape unclear.** Users had to study `config.json.example` to understand these are the same shape as `llm`. The nesting felt arbitrary.
+3. **`privateKeyPath` confusion.** The path in `config.json` refers to the host filesystem, but inside Docker the PEM is mounted at `/app/app.pem`. Users kept putting the container path in config.
+4. **Ollama `https` vs `http` gotcha.** Local models run on `http://localhost`, but users reflexively type `https://`. The error that results is opaque (TLS handshake failure, not a clear message).
+
+### The solution: env vars as primary, config.json as fallback
+
+The new `loadConfig()` works in three steps:
+1. Read `config.json` if present (info log if absent — no longer fatal)
+2. Overlay env vars using nullish coalescing (`??`) — env vars win when set
+3. Run all existing validation (unchanged logic)
+
+This means:
+- **Docker users** only need `.env` — no `config.json` mount
+- **Local users** can use either `.env` or `config.json` (or both)
+- **Existing setups** keep working unchanged
+
+### Key design decisions
+
+**All-or-nothing for optional LLM sections.** `TRIAGE_LLM_*` and `REVIEWER_LLM_*` env vars only create their config section if `_PROVIDER` is set. This prevents half-configured sections where only the API key is set but no provider.
+
+**`parseIntEnv()` for numeric fields.** `GITHUB_APP_ID`, `GITHUB_APP_INSTALLATION_ID`, `WEBHOOK_PORT`, `MAX_ISSUES_PER_RUN`, and `MAX_TOOL_CALLS_PER_RUN` must be numbers. The helper parses env var strings to integers, returning `undefined` for invalid values (which then falls through to the config.json value or to the validation error).
+
+**Localhost-HTTPS warning.** A new `warnLocalhostHttps()` helper checks all three LLM baseUrls. If you point `https://localhost:11434/v1` at Ollama, you get a clear warning instead of a cryptic TLS error. This is a `console.warn`, not an error — it doesn't block startup in case someone legitimately runs HTTPS locally.
+
+**Caddyfile is now committable.** By using `{$DOMAIN}` (a Caddy env var placeholder), the Caddyfile template contains no secrets or user-specific values. Docker Compose passes the `DOMAIN` env var from `.env` to Caddy via `env_file`. No more user-created `Caddyfile` that's git-ignored.
+
+### What changed
+
+- `config.ts`: Three new helpers + rewritten `loadConfig()` with env var merge
+- `tests/config.test.ts`: Env var cleanup in `beforeEach`, 12 new tests (269 total)
+- `.env.example`: Comprehensive template covering all sections
+- `Caddyfile.example`: Uses `{$DOMAIN}` env var, no more hardcoded domain
+- `docker-compose.yml`: `env_file: .env`, Caddyfile.example mounted directly
+- `.gitignore`: Removed `Caddyfile` (now committable)
+
+### Connections to previous entries
+
+- **Entry 1** (Project Overview): config.ts was the simplest file — "read and validate config.json." Now it's the merge layer between two config sources.
+- **Entry 43** (GitHub App Auth): The `privateKeyPath` confusion was a direct consequence of adding App auth. Env vars make the Docker mount path clearer.
+- **Entry 30** (Webhook Listener): Webhook secret was already in `config.json`. Now `WEBHOOK_SECRET` env var is a more natural fit for Docker deployments.

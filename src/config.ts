@@ -1,22 +1,108 @@
 import fs from 'fs';
 
 /**
- * Load config from config.json file in project root
+ * Read an LLM config section from env vars with a given prefix.
+ * Returns undefined if {PREFIX}_PROVIDER is not set (all-or-nothing).
+ */
+function readLlmFromEnv(prefix: string) {
+  const provider = process.env[`${prefix}_PROVIDER`];
+  if (!provider) return undefined;
+  return {
+    provider,
+    apiKey: process.env[`${prefix}_API_KEY`] || null,
+    model: process.env[`${prefix}_MODEL`] || null,
+    baseUrl: process.env[`${prefix}_BASE_URL`] || null,
+  };
+}
+
+/**
+ * Parse an env var as an integer. Returns undefined if not set or not a valid integer.
+ */
+function parseIntEnv(name: string): number | undefined {
+  const val = process.env[name];
+  if (val === undefined || val === '') return undefined;
+  const num = parseInt(val, 10);
+  if (isNaN(num)) return undefined;
+  return num;
+}
+
+/**
+ * Warn if a baseUrl points to localhost/127.0.0.1 over HTTPS (common Ollama gotcha).
+ */
+function warnLocalhostHttps(label: string, baseUrl: string | null | undefined) {
+  if (!baseUrl) return;
+  try {
+    const url = new URL(baseUrl);
+    if (url.protocol === 'https:' && (url.hostname === 'localhost' || url.hostname === '127.0.0.1')) {
+      console.warn(`⚠️  ${label} baseUrl uses HTTPS for localhost — did you mean http://?`);
+    }
+  } catch {
+    // Invalid URL — validation will catch it elsewhere
+  }
+}
+
+/**
+ * Load config from env vars and/or config.json file.
+ * Env vars override config.json values (nullish coalescing).
  */
 export function loadConfig() {
   const configPath = './config.json';
 
-  if (!fs.existsSync(configPath)) {
-    console.error('❌ config.json not found. Copy config.json.example to config.json and fill in your credentials.');
-    process.exit(1);
+  // 1. Read config.json if present (no longer fatal if missing)
+  let fileConfig: any = {};
+  if (fs.existsSync(configPath)) {
+    const configFile = fs.readFileSync(configPath, 'utf-8');
+    fileConfig = JSON.parse(configFile);
+  } else {
+    console.info('ℹ️  config.json not found — loading configuration from environment variables.');
   }
 
-  const configFile = fs.readFileSync(configPath, 'utf-8');
-  const config = JSON.parse(configFile);
+  // 2. Build merged config: env vars override file values
+  const fileGithub = fileConfig.github || {};
+  const fileLlm = fileConfig.llm || {};
 
-  // Validate required fields: owner and repo are always required
+  const config: any = {
+    github: {
+      owner: process.env.GITHUB_OWNER ?? fileGithub.owner,
+      repo: process.env.GITHUB_REPO ?? fileGithub.repo,
+      token: process.env.GITHUB_TOKEN ?? fileGithub.token,
+      appId: parseIntEnv('GITHUB_APP_ID') ?? fileGithub.appId,
+      privateKeyPath: process.env.GITHUB_APP_PEM_PATH ?? fileGithub.privateKeyPath,
+      installationId: parseIntEnv('GITHUB_APP_INSTALLATION_ID') ?? fileGithub.installationId,
+    },
+    llm: {
+      provider: process.env.LLM_PROVIDER ?? fileLlm.provider,
+      apiKey: process.env.LLM_API_KEY ?? fileLlm.apiKey,
+      model: process.env.LLM_MODEL ?? fileLlm.model,
+      baseUrl: process.env.LLM_BASE_URL ?? fileLlm.baseUrl,
+    },
+    maxIssuesPerRun: parseIntEnv('MAX_ISSUES_PER_RUN') ?? fileConfig.maxIssuesPerRun,
+    maxToolCallsPerRun: parseIntEnv('MAX_TOOL_CALLS_PER_RUN') ?? fileConfig.maxToolCallsPerRun,
+  };
+
+  // triageLlm: env vars (all-or-nothing) ?? config.json
+  const triageFromEnv = readLlmFromEnv('TRIAGE_LLM');
+  config.triageLlm = triageFromEnv ?? fileConfig.triageLlm;
+
+  // reviewerLlm: env vars (all-or-nothing) ?? config.json
+  const reviewerFromEnv = readLlmFromEnv('REVIEWER_LLM');
+  config.reviewerLlm = reviewerFromEnv ?? fileConfig.reviewerLlm;
+
+  // webhook: env vars ?? config.json
+  const webhookPort = parseIntEnv('WEBHOOK_PORT');
+  const webhookSecret = process.env.WEBHOOK_SECRET;
+  if (webhookPort !== undefined || webhookSecret) {
+    config.webhook = {
+      port: webhookPort ?? fileConfig.webhook?.port,
+      secret: webhookSecret ?? fileConfig.webhook?.secret,
+    };
+  } else {
+    config.webhook = fileConfig.webhook;
+  }
+
+  // 3. Validate required fields
   if (!config.github.owner || !config.github.repo) {
-    console.error('❌ Missing required GitHub config: owner, repo');
+    console.error('❌ Missing required GitHub config: owner, repo. Set GITHUB_OWNER/GITHUB_REPO env vars or provide config.json.');
     process.exit(1);
   }
 
@@ -38,21 +124,20 @@ export function loadConfig() {
   }
 
   if (!hasToken && appFieldCount === 3) {
-    // Validate that the private key file exists
     if (!fs.existsSync(config.github.privateKeyPath)) {
       console.error(`❌ GitHub App private key file not found: ${config.github.privateKeyPath}`);
       process.exit(1);
     }
   }
 
-  // API key is required for cloud providers, optional for local (ollama, openai-compatible)
+  // LLM validation
   const localProviders = ['ollama', 'openai-compatible'];
   if (!config.llm.apiKey && !localProviders.includes(config.llm.provider)) {
     console.error('❌ Missing LLM API key');
     process.exit(1);
   }
 
-  // Validate triageLlm if present (optional -- falls back to main llm)
+  // triageLlm validation
   if (config.triageLlm) {
     if (!config.triageLlm.provider) {
       console.error('❌ triageLlm.provider is required when triageLlm is specified');
@@ -64,7 +149,7 @@ export function loadConfig() {
     }
   }
 
-  // Validate reviewerLlm if present (optional -- falls back to main llm)
+  // reviewerLlm validation
   if (config.reviewerLlm) {
     if (!config.reviewerLlm.provider) {
       console.error('❌ reviewerLlm.provider is required when reviewerLlm is specified');
@@ -76,7 +161,7 @@ export function loadConfig() {
     }
   }
 
-  // Validate webhook config if present (optional -- only needed for `deepagents webhook`)
+  // webhook validation
   if (config.webhook) {
     if (typeof config.webhook.port !== 'number' || config.webhook.port < 1 || config.webhook.port > 65535) {
       console.error('❌ webhook.port must be a number between 1 and 65535');
@@ -87,6 +172,11 @@ export function loadConfig() {
       process.exit(1);
     }
   }
+
+  // localhost-https warnings
+  warnLocalhostHttps('llm', config.llm.baseUrl);
+  if (config.triageLlm) warnLocalhostHttps('triageLlm', config.triageLlm.baseUrl);
+  if (config.reviewerLlm) warnLocalhostHttps('reviewerLlm', config.reviewerLlm.baseUrl);
 
   return config;
 }

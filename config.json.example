@@ -22,8 +22,20 @@
       "openai-compatible": { "provider": "openai-compatible", "apiKey": "key-or-null", "model": "my-model",                "baseUrl": "http://localhost:1234/v1" }
     }
   },
-  "triageLlm": null,
-  "reviewerLlm": null,
+  "triageLlm": {
+    "_comment": "Optional: cheaper/faster model for issue triage. Set to null to use main llm. Same shape as llm above.",
+    "provider": "anthropic",
+    "apiKey": "sk-ant-xxx",
+    "model": "claude-haiku-4-5-20251001",
+    "baseUrl": null
+  },
+  "reviewerLlm": {
+    "_comment": "Optional: different model for PR reviews. Set to null to use main llm. Same shape as llm above.",
+    "provider": "anthropic",
+    "apiKey": "sk-ant-xxx",
+    "model": "claude-haiku-4-5-20251001",
+    "baseUrl": null
+  },
   "webhook": {
     "port": 3000,
     "secret": "your-webhook-secret"

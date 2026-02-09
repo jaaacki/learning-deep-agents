@@ -1,6 +1,0 @@
-# Replace yourdomain.com with your actual domain.
-# Caddy automatically provisions TLS certificates via Let's Encrypt.
-
-yourdomain.com {
-	reverse_proxy bot:3000
-}

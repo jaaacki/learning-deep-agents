@@ -45,7 +45,7 @@ GitHub  --webhook-->  deepagents webhook  -->  issues.opened  --> Triage + Analy
 **Optional (for deployment):**
 
 - [Docker](https://docs.docker.com/get-docker/) and Docker Compose (for containerized deployment)
-- A domain name with DNS pointing to your server (for production HTTPS via Caddy)
+- A domain name managed by Cloudflare (for production HTTPS via Caddy with DNS challenge)
 
 ## Setup
 
@@ -57,7 +57,45 @@ cd learning-deep-agents
 pnpm install
 ```
 
-### 2. Create your config
+### 2. Configure credentials
+
+There are two ways to configure the bot. You can use either one or both (env vars override config.json).
+
+#### Option A: Environment variables (recommended)
+
+```bash
+cp .env.example .env
+```
+
+Edit `.env` with your credentials. The file is self-documented with all available settings:
+
+```bash
+# Required
+GITHUB_OWNER=your-github-username
+GITHUB_REPO=your-repo-name
+GITHUB_TOKEN=ghp_xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
+LLM_PROVIDER=anthropic
+LLM_API_KEY=sk-ant-xxx
+LLM_MODEL=claude-sonnet-4-20250514
+
+# Optional: cheaper model for triage (omit to use main LLM)
+# TRIAGE_LLM_PROVIDER=anthropic
+# TRIAGE_LLM_API_KEY=sk-ant-xxx
+# TRIAGE_LLM_MODEL=claude-haiku-4-5-20251001
+
+# Optional: different model for PR reviews
+# REVIEWER_LLM_PROVIDER=anthropic
+# REVIEWER_LLM_API_KEY=sk-ant-xxx
+# REVIEWER_LLM_MODEL=claude-haiku-4-5-20251001
+
+# Optional: webhook listener
+# WEBHOOK_PORT=3000
+# WEBHOOK_SECRET=your-secret   # generate with: openssl rand -hex 32
+```
+
+See `.env.example` for the full list including GitHub App auth, limits, and Docker/Caddy settings.
+
+#### Option B: config.json (legacy)
 
 ```bash
 cp config.json.example config.json
@@ -87,13 +125,23 @@ Edit `config.json`. Here is the full config with all available fields:
     "baseUrl": null             // only needed for openai-compatible
   },
 
-  // Optional: use a cheaper/faster model for triage (falls back to main llm)
-  "triageLlm": null,
-  // Example: { "provider": "anthropic", "apiKey": "sk-ant-xxx", "model": "claude-haiku-4-5-20251001", "baseUrl": null }
+  // Optional: cheaper/faster model for issue triage (same shape as llm above)
+  // Set to null to use the main llm for triage
+  "triageLlm": {
+    "provider": "anthropic",
+    "apiKey": "sk-ant-xxx",
+    "model": "claude-haiku-4-5-20251001",
+    "baseUrl": null
+  },
 
-  // Optional: use a different model for PR reviews (falls back to main llm)
-  "reviewerLlm": null,
-  // Example: { "provider": "openai", "apiKey": "sk-xxx", "model": "gpt-4", "baseUrl": null }
+  // Optional: different model for PR reviews (same shape as llm above)
+  // Set to null to use the main llm for reviews
+  "reviewerLlm": {
+    "provider": "anthropic",
+    "apiKey": "sk-ant-xxx",
+    "model": "claude-haiku-4-5-20251001",
+    "baseUrl": null
+  }
 
   // Optional: required only for `pnpm webhook` and Docker deployment
   "webhook": {
@@ -106,20 +154,44 @@ Edit `config.json`. Here is the full config with all available fields:
 }
 ```
 
+**Env var / config.json mapping:**
+
+| Env var | config.json path |
+|---------|-----------------|
+| `GITHUB_OWNER` | `github.owner` |
+| `GITHUB_REPO` | `github.repo` |
+| `GITHUB_TOKEN` | `github.token` |
+| `GITHUB_APP_ID` | `github.appId` |
+| `GITHUB_APP_PEM_PATH` | `github.privateKeyPath` |
+| `GITHUB_APP_INSTALLATION_ID` | `github.installationId` |
+| `LLM_PROVIDER` / `LLM_API_KEY` / `LLM_MODEL` / `LLM_BASE_URL` | `llm.*` |
+| `TRIAGE_LLM_PROVIDER` / `_API_KEY` / `_MODEL` / `_BASE_URL` | `triageLlm.*` |
+| `REVIEWER_LLM_PROVIDER` / `_API_KEY` / `_MODEL` / `_BASE_URL` | `reviewerLlm.*` |
+| `WEBHOOK_PORT` / `WEBHOOK_SECRET` | `webhook.*` |
+| `MAX_ISSUES_PER_RUN` / `MAX_TOOL_CALLS_PER_RUN` | top-level |
+
 **Field notes:**
+- `triageLlm` / `reviewerLlm` have the **same shape** as `llm` (`provider`, `apiKey`, `model`, `baseUrl`). Set to `null` (or omit env vars) to use the main `llm` for everything.
 - `maxIssuesPerRun` caps how many issues the agent processes per invocation. Lower this for busy repos or higher LLM costs.
 - `maxToolCallsPerRun` is a circuit breaker that caps total tool calls per run. If the agent enters a loop, this stops it from burning unlimited API credits.
 
 #### Other LLM providers
 
+```bash
+# OpenAI
+LLM_PROVIDER=openai  LLM_API_KEY=sk-...  LLM_MODEL=gpt-4
+
+# Ollama (local) — note: use http://, not https://
+LLM_PROVIDER=ollama  LLM_MODEL=llama3
+
+# OpenAI-compatible (LM Studio, Together, Groq, etc.)
+LLM_PROVIDER=openai-compatible  LLM_API_KEY=key-or-empty  LLM_MODEL=my-model  LLM_BASE_URL=http://localhost:1234/v1
+```
+
+Or equivalently in config.json:
 ```json
-// OpenAI
 { "provider": "openai", "apiKey": "sk-...", "model": "gpt-4", "baseUrl": null }
-
-// Ollama (local)
 { "provider": "ollama", "apiKey": null, "model": "llama3", "baseUrl": null }
-
-// OpenAI-compatible (LM Studio, Together, Groq, etc.)
 { "provider": "openai-compatible", "apiKey": "key-or-null", "model": "my-model", "baseUrl": "http://localhost:1234/v1" }
 ```
 
@@ -275,7 +347,7 @@ Add this line (polls every 15 minutes):
 
 The webhook listener receives GitHub events in real-time instead of polling on a schedule. It processes `issues.opened` and `pull_request.opened` events.
 
-**Prerequisites:** The `webhook` section in `config.json` must be filled in (see [config example above](#2-create-your-config)).
+**Prerequisites:** Webhook config must be set — either `WEBHOOK_PORT`/`WEBHOOK_SECRET` env vars or `webhook` section in `config.json` (see [config above](#2-configure-credentials)).
 
 Generate a strong webhook secret:
 
@@ -284,7 +356,7 @@ openssl rand -hex 32
 ```
 
 Paste the output into both:
-1. `config.json` → `webhook.secret`
+1. `.env` → `WEBHOOK_SECRET` (or `config.json` → `webhook.secret`)
 2. Your GitHub repo's webhook settings (Settings → Webhooks → Add webhook):
    - **Payload URL:** `http://your-server:3000/webhook` (or use a tunnel like ngrok for local dev)
    - **Content type:** `application/json`
@@ -308,7 +380,7 @@ Run the webhook listener in Docker. Two options: **local testing** (bot only) or
 #### Prerequisites
 
 - [Docker](https://docs.docker.com/get-docker/) and Docker Compose
-- `config.json` with valid credentials including the `webhook` section
+- `.env` with valid credentials including `WEBHOOK_PORT`/`WEBHOOK_SECRET` (or `config.json` with webhook section)
 
 #### Create runtime files
 
@@ -348,32 +420,53 @@ You should see:
 
 #### Option B: Production (bot + Caddy with HTTPS)
 
-For production, Caddy provides automatic TLS via Let's Encrypt.
+For production, Caddy provides automatic TLS via Let's Encrypt using the Cloudflare DNS challenge. This means your server doesn't need port 80 open — Caddy proves domain ownership by creating a temporary DNS record via the Cloudflare API.
 
 **Additional prerequisites:**
-- A domain name with DNS pointing to your server
+- A domain name with DNS managed by Cloudflare
+- A Cloudflare API Token with **Zone / Zone / Read** and **Zone / DNS / Edit** permissions
 
-**1. Configure your domain**
+**1. Create a Cloudflare API Token**
 
-Edit `Caddyfile` and replace `yourdomain.com` with your actual domain:
+1. Go to [Cloudflare dashboard](https://dash.cloudflare.com) → your domain → **Overview** (note the Zone ID)
+2. Go to **My Profile** → **API Tokens** → **Create Token**
+3. Use the **Edit zone DNS** template, or create a custom token with:
+   - **Zone / Zone / Read**
+   - **Zone / DNS / Edit**
+   - Scope it to your specific zone (domain)
+4. Copy the token
 
+**2. Configure your domain**
+
+Set the `DOMAIN` variable in your `.env`:
+
+```bash
+DOMAIN=yourdomain.com
 ```
-yourdomain.com {
-    reverse_proxy bot:3000
-}
+
+The `Caddyfile.example` uses `{$DOMAIN}` and is mounted directly by Docker Compose — no need to copy or edit it.
+
+**3. Set the Cloudflare token**
+
+Also in `.env`:
+
+```bash
+CLOUDFLARE_API_TOKEN=your-cloudflare-api-token
 ```
 
-**2. Build and start**
+**4. Build and start**
 
 ```bash
 docker compose up -d --build
 ```
 
+The first build takes a bit longer as it compiles a custom Caddy binary with the Cloudflare DNS plugin.
+
 This starts two containers:
 - **bot** -- the webhook listener on port 3000 (internal only)
-- **caddy** -- reverse proxy on ports 80/443 with automatic TLS
+- **caddy** -- reverse proxy on ports 80/443 with automatic TLS via Cloudflare DNS challenge
 
-**3. Verify**
+**5. Verify**
 
 ```bash
 # Check container health
@@ -386,12 +479,12 @@ docker compose logs -f bot
 curl https://yourdomain.com/health
 ```
 
-**4. Point GitHub webhook**
+**6. Point GitHub webhook**
 
 In your GitHub repo settings, add a webhook:
 - **Payload URL:** `https://yourdomain.com/webhook`
 - **Content type:** `application/json`
-- **Secret:** same value as `webhook.secret` in your `config.json`
+- **Secret:** same value as `WEBHOOK_SECRET` in your `.env` (or `webhook.secret` in `config.json`)
 - **Events:** select "Issues" and "Pull requests"
 
 #### Stopping
@@ -453,14 +546,14 @@ pnpm test
 pnpm run test:watch
 ```
 
-257 tests across 9 test files using [vitest](https://vitest.dev/) with mocked external dependencies (Octokit, LLM constructors, filesystem). No real API calls are made during testing.
+269 tests across 9 test files using [vitest](https://vitest.dev/) with mocked external dependencies (Octokit, LLM constructors, filesystem). No real API calls are made during testing.
 
 ## Troubleshooting
 
 | Problem | Fix |
 |---------|-----|
-| `config.json not found` | Run `cp config.json.example config.json` and fill in credentials |
-| `Missing LLM API key` | Add your Anthropic key to `config.json` |
+| `Missing required GitHub config` | Set `GITHUB_OWNER`/`GITHUB_REPO` env vars or create `config.json` from the example |
+| `Missing LLM API key` | Set `LLM_API_KEY` env var or add your key to `config.json` |
 | `Error fetching issues: HttpError` | Check your GitHub token has `repo` scope |
 | `Error creating branch: Not Found` | Make sure the repo has a `main` branch (not `master`) |
 | `Error creating pull request: Validation Failed` | Branch might already exist from a previous run |
@@ -468,9 +561,11 @@ pnpm run test:watch
 | `poll.sh: pnpm: command not found` | Uncomment the correct PATH line in `poll.sh` |
 | `Incomplete GitHub App config` | All three fields required: `appId`, `privateKeyPath`, `installationId` |
 | `GitHub App private key file not found` | Check `privateKeyPath` points to a valid `.pem` file |
-| Webhook returns 401 / signature mismatch | Ensure `webhook.secret` in `config.json` matches the secret in GitHub webhook settings exactly |
+| Webhook returns 401 / signature mismatch | Ensure `WEBHOOK_SECRET` (or `webhook.secret` in config.json) matches the secret in GitHub webhook settings exactly |
 | Webhook not firing | In GitHub repo → Settings → Webhooks, check that "Issues" and "Pull requests" events are selected |
-| `EADDRINUSE` when starting webhook | Another process is using the port; change `webhook.port` in config or stop the other process |
+| `EADDRINUSE` when starting webhook | Another process is using the port; change `WEBHOOK_PORT` (or `webhook.port` in config) or stop the other process |
+| `HTTPS for localhost` warning | You have `https://localhost` as a baseUrl — Ollama and local models use `http://`, not `https://` |
+| Caddy fails to get TLS cert | Check `CLOUDFLARE_API_TOKEN` is set in `.env` and the token has Zone/DNS permissions |
 
 ## File Structure
 
@@ -480,7 +575,7 @@ learning-deep-agents/
     cli.ts            -- CLI entry point (subcommands: poll, analyze, triage, review, webhook, status)
     core.ts           -- Shared logic (poll cycle, state management, graceful shutdown)
     index.ts          -- Original entry point (thin wrapper, backwards-compatible)
-    config.ts         -- Loads and validates config.json (GitHub + LLM + webhook)
+    config.ts         -- Loads config from env vars and/or config.json (GitHub + LLM + webhook)
     model.ts          -- LLM provider factory (Anthropic, OpenAI, Ollama, etc.)
     github-tools.ts   -- GitHub API tools (fetch, list files, comment, branch, PR, commit, review)
     agent.ts          -- Creates the analysis agent with tools + system prompt
@@ -500,16 +595,19 @@ learning-deep-agents/
     utils.test.ts     -- Retry logic and error classification tests
     listener.test.ts  -- Webhook endpoint and signature verification tests
   issues/             -- Generated: detailed analysis files
-  config.json         -- Your credentials (git-ignored)
+  .env                -- Your credentials and settings (git-ignored, single source of truth)
+  .env.example        -- Comprehensive template for .env
+  config.json         -- Optional fallback credentials (git-ignored, env vars override)
   config.json.example -- Template for config.json
   last_poll.json      -- Generated: polling state (git-ignored)
   poll.sh             -- Cron wrapper script
   poll.log            -- Generated: cron run logs (git-ignored)
   LEARNING_LOG.md     -- Project learning narrative
   CLAUDE.md           -- Claude Code project instructions
-  Dockerfile          -- Container image definition
+  Dockerfile          -- Container image definition (bot)
+  Dockerfile.caddy    -- Custom Caddy build with Cloudflare DNS plugin
   docker-compose.yml  -- Bot + Caddy reverse proxy stack
-  Caddyfile           -- Caddy reverse proxy config (TLS termination)
+  Caddyfile.example   -- Caddy config (committable — uses {$DOMAIN} env var)
   .dockerignore       -- Files excluded from Docker build context
 ```
 

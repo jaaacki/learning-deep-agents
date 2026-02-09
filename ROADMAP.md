@@ -151,6 +151,16 @@ Issue opened
 
 ---
 
+## Post-v1.0 Improvements
+
+Incremental improvements after the v1.0.0 milestone. These are not new phases — they polish the developer experience based on real-world usage.
+
+| Version | Change | Status |
+|---------|--------|--------|
+| v1.1.0 | Consolidate config into `.env` as single source of truth (#47) | ✓ v1.1.0 |
+
+---
+
 ## Guiding Principles
 
 1. **Learning first** — every feature is an opportunity to understand a pattern (ReAct, tool composition, LangGraph, event-driven architecture)
