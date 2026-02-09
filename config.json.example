@@ -13,9 +13,17 @@
     "provider": "anthropic",
     "apiKey": "sk-ant-xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx",
     "model": "claude-sonnet-4-20250514",
-    "baseUrl": null
+    "baseUrl": null,
+
+    "_examples": {
+      "anthropic":         { "provider": "anthropic",         "apiKey": "sk-ant-xxx", "model": "claude-sonnet-4-20250514", "baseUrl": null },
+      "openai":            { "provider": "openai",            "apiKey": "sk-xxx",     "model": "gpt-4",                    "baseUrl": null },
+      "ollama":            { "provider": "ollama",            "apiKey": null,          "model": "llama3",                   "baseUrl": null },
+      "openai-compatible": { "provider": "openai-compatible", "apiKey": "key-or-null", "model": "my-model",                "baseUrl": "http://localhost:1234/v1" }
+    }
   },
   "triageLlm": null,
+  "reviewerLlm": null,
   "webhook": {
     "port": 3000,
     "secret": "your-webhook-secret"

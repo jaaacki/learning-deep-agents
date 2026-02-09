@@ -33,53 +33,19 @@ GitHub  --webhook-->  deepagents webhook  -->  issues.opened  --> Triage + Analy
                                           -->  pull_request.opened --> Reviewer Agent
 ```
 
-## CLI Usage
-
-The project provides a CLI with subcommands:
-
-```bash
-# Run a poll cycle (fetch + analyze + comment + branch + PR)
-pnpm run cli poll
-
-# Dry run: skip GitHub writes (comments, branches, PRs) -- safe for testing
-pnpm run cli poll --dry-run
-
-# No-save: run normally but don't persist poll state
-pnpm run cli poll --no-save
-
-# Override max issues from config
-pnpm run cli poll --max-issues 3
-
-# Analyze a single issue by number
-pnpm run cli analyze --issue 42
-
-# Triage a single issue (cheap/fast classification)
-pnpm run cli triage --issue 42
-
-# Review a pull request (fetch diff, analyze, post review comment)
-pnpm run cli review --pr 10
-
-# Retract all agent actions on an issue (close PR, delete branch, delete comment)
-pnpm run cli retract --issue 42
-
-# Start webhook listener (real-time, replaces cron)
-pnpm run cli webhook
-
-# Show current polling state
-pnpm run cli status
-
-# Show help
-pnpm run cli help
-```
-
-The original `pnpm start` still works and runs a single poll cycle.
-
 ## Prerequisites
+
+**Required:**
 
 - Node.js 24+
 - [pnpm](https://pnpm.io/) package manager
-- A GitHub account with a [Personal Access Token](https://github.com/settings/tokens) (scopes: `repo`)
-- An Anthropic API key from [console.anthropic.com](https://console.anthropic.com)
+- A GitHub account with either a [Personal Access Token](https://github.com/settings/tokens) or a [GitHub App](#github-app) (see below)
+- An LLM API key (e.g. [Anthropic](https://console.anthropic.com), OpenAI, or a local model via Ollama)
+
+**Optional (for deployment):**
+
+- [Docker](https://docs.docker.com/get-docker/) and Docker Compose (for containerized deployment)
+- A domain name with DNS pointing to your server (for production HTTPS via Caddy)
 
 ## Setup
 
@@ -97,29 +63,52 @@ pnpm install
 cp config.json.example config.json
 ```
 
-Edit `config.json`:
+Edit `config.json`. Here is the full config with all available fields:
 
-```json
+```jsonc
 {
   "github": {
     "owner": "your-github-username",
     "repo": "your-repo-name",
-    "token": "ghp_your_token_here"
+
+    // Auth option 1: Personal Access Token
+    "token": "ghp_xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx",
+
+    // Auth option 2: GitHub App (remove token above if using this)
+    // All three fields are required when using App auth
+    "appId": null,              // number — from your App's General page
+    "privateKeyPath": null,     // string — path to .pem file (never commit this!)
+    "installationId": null      // number — from the installation URL
   },
   "llm": {
-    "provider": "anthropic",
-    "apiKey": "sk-ant-your_key_here",
+    "provider": "anthropic",    // "anthropic" | "openai" | "ollama" | "openai-compatible"
+    "apiKey": "sk-ant-xxx",     // required for cloud providers, null for ollama
     "model": "claude-sonnet-4-20250514",
-    "baseUrl": null
+    "baseUrl": null             // only needed for openai-compatible
   },
-  "maxIssuesPerRun": 5,
-  "maxToolCallsPerRun": 30
+
+  // Optional: use a cheaper/faster model for triage (falls back to main llm)
+  "triageLlm": null,
+  // Example: { "provider": "anthropic", "apiKey": "sk-ant-xxx", "model": "claude-haiku-4-5-20251001", "baseUrl": null }
+
+  // Optional: use a different model for PR reviews (falls back to main llm)
+  "reviewerLlm": null,
+  // Example: { "provider": "openai", "apiKey": "sk-xxx", "model": "gpt-4", "baseUrl": null }
+
+  // Optional: required only for `pnpm webhook` and Docker deployment
+  "webhook": {
+    "port": 3000,
+    "secret": "your-webhook-secret"   // must match the secret in GitHub webhook settings
+  },
+
+  "maxIssuesPerRun": 5,     // cap issues processed per poll cycle (default: 5)
+  "maxToolCallsPerRun": 30  // circuit breaker — exits with code 2 when tripped
 }
 ```
 
-`maxIssuesPerRun` caps how many issues the agent processes per invocation (default: 5). Lower this for busy repos or higher LLM costs.
-
-`maxToolCallsPerRun` is a circuit breaker that caps total tool calls per run (default: 30). If the agent enters a loop, this stops it from burning unlimited API credits. The process exits with code 2 when tripped.
+**Field notes:**
+- `maxIssuesPerRun` caps how many issues the agent processes per invocation. Lower this for busy repos or higher LLM costs.
+- `maxToolCallsPerRun` is a circuit breaker that caps total tool calls per run. If the agent enters a loop, this stops it from burning unlimited API credits.
 
 #### Other LLM providers
 
@@ -136,7 +125,59 @@ Edit `config.json`:
 
 **Tip:** Point it at a repo you own that has a few open issues. If you don't have one, create a test repo with 2-3 dummy issues.
 
-### 3. Test a single run
+### 3. GitHub Authentication
+
+You need **one** of the two methods below. A Personal Access Token is simpler for local use; a GitHub App is better for production and Docker deployments.
+
+#### Personal Access Token (PAT)
+
+1. Go to **GitHub.com** → **Settings** → **Developer settings** → **Personal access tokens** → **Tokens (classic)**
+2. Click **Generate new token (classic)**
+3. Select the **`repo`** scope (full control of private repositories)
+4. Click **Generate token** and copy it immediately (you won't see it again)
+5. Paste the token into `config.json` → `github.token`
+
+```json
+"github": {
+  "owner": "your-username",
+  "repo": "your-repo",
+  "token": "ghp_xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"
+}
+```
+
+#### GitHub App
+
+A GitHub App uses short-lived installation tokens and doesn't tie permissions to your personal account.
+
+1. Go to **GitHub.com** → **Settings** → **Developer settings** → **GitHub Apps** → **New GitHub App**
+2. Fill in the required fields:
+   - **App name**: e.g. `deep-agents-bot`
+   - **Homepage URL**: your repo URL or any URL
+   - **Webhook**: deactivate the checkbox (unless you want webhook delivery to this app)
+3. Set **permissions**:
+   - **Issues**: Read & Write
+   - **Pull requests**: Read & Write
+   - **Contents**: Read & Write
+4. Click **Create GitHub App**
+5. On the App's **General** page, note the **App ID** (a number near the top)
+6. Scroll to **Private keys** → click **Generate a private key**
+   - Save the `.pem` file somewhere safe outside the repo (e.g. `~/.config/deep-agents/app.pem`)
+   - **Never commit this file**
+7. Click **Install App** (left sidebar) → install it on the repo you want the bot to manage
+8. After installation, the URL will look like `https://github.com/settings/installations/12345678` — the number at the end is your **Installation ID**
+9. Fill in `config.json` (remove the `token` field):
+
+```json
+"github": {
+  "owner": "your-username",
+  "repo": "your-repo",
+  "appId": 123456,
+  "privateKeyPath": "/home/you/.config/deep-agents/app.pem",
+  "installationId": 12345678
+}
+```
+
+### 4. Test a single run
 
 ```bash
 pnpm start
@@ -177,7 +218,7 @@ After the run, check:
 - **GitHub PRs** — should have a new draft PR titled "Fix #1: ..."
 - **`last_poll.json`** — should exist with the timestamp and processed issue numbers
 
-### 4. Test a second run (polling)
+### 5. Test a second run (polling)
 
 Run `pnpm start` again. This time the agent should skip already-processed issues:
 
@@ -188,7 +229,17 @@ Run `pnpm start` again. This time the agent should skip already-processed issues
 🆕 No new issues to process.
 ```
 
-### 5. Set up cron (optional)
+## Running Modes
+
+Choose the mode that fits your use case:
+
+| Mode | Best for | How it works |
+|------|----------|--------------|
+| **Cron polling** | Simple, low-volume repos | Cron job runs `poll.sh` on a schedule |
+| **Webhook (local)** | Development / testing | `pnpm webhook` listens for GitHub events |
+| **Docker + Caddy** | Production deployment | Containerized webhook listener with auto-HTTPS |
+
+### Cron polling
 
 Make `poll.sh` executable and edit the PATH line for your system:
 
@@ -217,20 +268,180 @@ crontab -e
 Add this line (polls every 15 minutes):
 
 ```
-*/15 * * * * /Users/your-name/Dev/deepagents/poll.sh
+*/15 * * * * /Users/your-name/Dev/learning-deep-agents/poll.sh
 ```
 
-## Troubleshooting
+### Webhook listener (local)
 
-| Problem | Fix |
-|---------|-----|
-| `config.json not found` | Run `cp config.json.example config.json` and fill in credentials |
-| `Missing LLM API key` | Add your Anthropic key to `config.json` |
-| `Error fetching issues: HttpError` | Check your GitHub token has `repo` scope |
-| `Error creating branch: Not Found` | Make sure the repo has a `main` branch (not `master`) |
-| `Error creating pull request: Validation Failed` | Branch might already exist from a previous run |
-| Agent doesn't comment/create PR | Check console output for API errors; token might lack permissions |
-| `poll.sh: pnpm: command not found` | Uncomment the correct PATH line in `poll.sh` |
+The webhook listener receives GitHub events in real-time instead of polling on a schedule. It processes `issues.opened` and `pull_request.opened` events.
+
+**Prerequisites:** The `webhook` section in `config.json` must be filled in (see [config example above](#2-create-your-config)).
+
+Generate a strong webhook secret:
+
+```bash
+openssl rand -hex 32
+```
+
+Paste the output into both:
+1. `config.json` → `webhook.secret`
+2. Your GitHub repo's webhook settings (Settings → Webhooks → Add webhook):
+   - **Payload URL:** `http://your-server:3000/webhook` (or use a tunnel like ngrok for local dev)
+   - **Content type:** `application/json`
+   - **Secret:** the value from `openssl rand -hex 32`
+   - **Events:** select "Issues" and "Pull requests"
+
+Start the listener:
+
+```bash
+pnpm webhook
+```
+
+The server exposes two endpoints:
+- `POST /webhook` — receives GitHub events (verified with HMAC-SHA256)
+- `GET /health` — returns `{ "status": "ok" }`
+
+### Docker deployment
+
+Run the webhook listener in Docker. Two options: **local testing** (bot only) or **production** (bot + Caddy with automatic HTTPS).
+
+#### Prerequisites
+
+- [Docker](https://docs.docker.com/get-docker/) and Docker Compose
+- `config.json` with valid credentials including the `webhook` section
+
+#### Create runtime files
+
+The bot needs `last_poll.json` and `issues/` to exist before mounting:
+
+```bash
+touch last_poll.json
+mkdir -p issues
+```
+
+#### Option A: Local testing (bot only)
+
+Run just the bot container without Caddy — useful for testing or development:
+
+```bash
+docker compose up -d --build bot
+```
+
+Verify it's working:
+
+```bash
+# Check container is healthy
+docker compose ps
+
+# View logs
+docker compose logs -f bot
+
+# Test health endpoint (from inside the container, since port 3000 is internal)
+docker exec deepagents-bot node -e "fetch('http://localhost:3000/health').then(r=>r.json()).then(console.log)"
+```
+
+You should see:
+
+```
+{ status: 'ok', timestamp: '2026-02-09T...' }
+```
+
+#### Option B: Production (bot + Caddy with HTTPS)
+
+For production, Caddy provides automatic TLS via Let's Encrypt.
+
+**Additional prerequisites:**
+- A domain name with DNS pointing to your server
+
+**1. Configure your domain**
+
+Edit `Caddyfile` and replace `yourdomain.com` with your actual domain:
+
+```
+yourdomain.com {
+    reverse_proxy bot:3000
+}
+```
+
+**2. Build and start**
+
+```bash
+docker compose up -d --build
+```
+
+This starts two containers:
+- **bot** -- the webhook listener on port 3000 (internal only)
+- **caddy** -- reverse proxy on ports 80/443 with automatic TLS
+
+**3. Verify**
+
+```bash
+# Check container health
+docker compose ps
+
+# View bot logs
+docker compose logs -f bot
+
+# Test health endpoint
+curl https://yourdomain.com/health
+```
+
+**4. Point GitHub webhook**
+
+In your GitHub repo settings, add a webhook:
+- **Payload URL:** `https://yourdomain.com/webhook`
+- **Content type:** `application/json`
+- **Secret:** same value as `webhook.secret` in your `config.json`
+- **Events:** select "Issues" and "Pull requests"
+
+#### Stopping
+
+```bash
+docker compose down
+```
+
+Caddy's TLS certificates persist in the `caddy_data` volume across restarts.
+
+## CLI Reference
+
+The project provides a CLI with subcommands:
+
+```bash
+# Run a poll cycle (fetch + analyze + comment + branch + PR)
+pnpm run cli poll
+
+# Dry run: skip GitHub writes (comments, branches, PRs) -- safe for testing
+pnpm run cli poll --dry-run
+
+# No-save: run normally but don't persist poll state
+pnpm run cli poll --no-save
+
+# Override max issues from config
+pnpm run cli poll --max-issues 3
+
+# Analyze a single issue by number
+pnpm run cli analyze --issue 42
+
+# Triage a single issue (cheap/fast classification)
+pnpm run cli triage --issue 42
+
+# Review a pull request (fetch diff, analyze, post review comment)
+pnpm run cli review --pr 10
+
+# Retract all agent actions on an issue (close PR, delete branch, delete comment)
+pnpm run cli retract --issue 42
+
+# Start webhook listener (real-time, replaces cron)
+pnpm run cli webhook
+
+# Show current polling state
+pnpm run cli status
+
+# Show help
+pnpm run cli help
+```
+
+The original `pnpm start` still works and runs a single poll cycle.
 
 ## Testing
 
@@ -244,10 +455,27 @@ pnpm run test:watch
 
 257 tests across 9 test files using [vitest](https://vitest.dev/) with mocked external dependencies (Octokit, LLM constructors, filesystem). No real API calls are made during testing.
 
+## Troubleshooting
+
+| Problem | Fix |
+|---------|-----|
+| `config.json not found` | Run `cp config.json.example config.json` and fill in credentials |
+| `Missing LLM API key` | Add your Anthropic key to `config.json` |
+| `Error fetching issues: HttpError` | Check your GitHub token has `repo` scope |
+| `Error creating branch: Not Found` | Make sure the repo has a `main` branch (not `master`) |
+| `Error creating pull request: Validation Failed` | Branch might already exist from a previous run |
+| Agent doesn't comment/create PR | Check console output for API errors; token might lack permissions |
+| `poll.sh: pnpm: command not found` | Uncomment the correct PATH line in `poll.sh` |
+| `Incomplete GitHub App config` | All three fields required: `appId`, `privateKeyPath`, `installationId` |
+| `GitHub App private key file not found` | Check `privateKeyPath` points to a valid `.pem` file |
+| Webhook returns 401 / signature mismatch | Ensure `webhook.secret` in `config.json` matches the secret in GitHub webhook settings exactly |
+| Webhook not firing | In GitHub repo → Settings → Webhooks, check that "Issues" and "Pull requests" events are selected |
+| `EADDRINUSE` when starting webhook | Another process is using the port; change `webhook.port` in config or stop the other process |
+
 ## File Structure
 
 ```
-deepagents/
+learning-deep-agents/
   src/
     cli.ts            -- CLI entry point (subcommands: poll, analyze, triage, review, webhook, status)
     core.ts           -- Shared logic (poll cycle, state management, graceful shutdown)
@@ -284,76 +512,6 @@ deepagents/
   Caddyfile           -- Caddy reverse proxy config (TLS termination)
   .dockerignore       -- Files excluded from Docker build context
 ```
-
-## Docker Deployment
-
-Run the webhook listener behind Caddy with automatic HTTPS.
-
-### Prerequisites
-
-- [Docker](https://docs.docker.com/get-docker/) and Docker Compose
-- A domain name with DNS pointing to your server
-- `config.json` with valid credentials (see Setup above)
-
-### 1. Configure your domain
-
-Edit `Caddyfile` and replace `yourdomain.com` with your actual domain:
-
-```
-yourdomain.com {
-    reverse_proxy bot:3000
-}
-```
-
-Caddy will automatically provision a TLS certificate from Let's Encrypt.
-
-### 2. Create runtime files
-
-The bot needs `last_poll.json` and `issues/` to exist before mounting:
-
-```bash
-touch last_poll.json
-mkdir -p issues
-```
-
-### 3. Build and start
-
-```bash
-docker compose up -d --build
-```
-
-This starts two containers:
-- **bot** -- the webhook listener on port 3000 (internal only)
-- **caddy** -- reverse proxy on ports 80/443 with automatic TLS
-
-### 4. Verify
-
-```bash
-# Check container health
-docker compose ps
-
-# View bot logs
-docker compose logs -f bot
-
-# Test health endpoint
-curl https://yourdomain.com/health
-```
-
-### 5. Point GitHub webhook
-
-In your GitHub repo settings, add a webhook:
-- **Payload URL:** `https://yourdomain.com/webhook`
-- **Content type:** `application/json`
-- **Secret:** same value as `webhook.secret` in your `config.json`
-- **Events:** select "Issues" and "Pull requests"
-
-### Stopping
-
-```bash
-docker compose down
-```
-
-Caddy's TLS certificates persist in the `caddy_data` volume across restarts.
 
 ## How to Reset
 
