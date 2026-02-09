@@ -351,7 +351,7 @@ Set the `DOMAIN` variable in your `.env`:
 DOMAIN=yourdomain.com
 ```
 
-The `Caddyfile.example` uses `{$DOMAIN}` and is mounted directly by Docker Compose — no need to copy or edit it.
+The `Caddyfile` uses `{$DOMAIN}` and is mounted directly by Docker Compose — no need to copy or edit it.
 
 **3. Set the Cloudflare token**
 
@@ -512,7 +512,7 @@ learning-deep-agents/
   Dockerfile          -- Container image definition (bot)
   Dockerfile.caddy    -- Custom Caddy build with Cloudflare DNS plugin
   docker-compose.yml  -- Bot + Caddy reverse proxy stack
-  Caddyfile.example   -- Caddy config (committable — uses {$DOMAIN} env var)
+  Caddyfile   -- Caddy config (committable — uses {$DOMAIN} env var)
   .dockerignore       -- Files excluded from Docker build context
 ```
 
