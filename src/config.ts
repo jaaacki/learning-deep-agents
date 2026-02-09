@@ -42,67 +42,48 @@ function warnLocalhostHttps(label: string, baseUrl: string | null | undefined) {
 }
 
 /**
- * Load config from env vars and/or config.json file.
- * Env vars override config.json values (nullish coalescing).
+ * Load config entirely from environment variables.
+ * Copy .env.example to .env and fill in your credentials.
  */
 export function loadConfig() {
-  const configPath = './config.json';
-
-  // 1. Read config.json if present (no longer fatal if missing)
-  let fileConfig: any = {};
-  if (fs.existsSync(configPath)) {
-    const configFile = fs.readFileSync(configPath, 'utf-8');
-    fileConfig = JSON.parse(configFile);
-  } else {
-    console.info('ℹ️  config.json not found — loading configuration from environment variables.');
-  }
-
-  // 2. Build merged config: env vars override file values
-  const fileGithub = fileConfig.github || {};
-  const fileLlm = fileConfig.llm || {};
-
   const config: any = {
     github: {
-      owner: process.env.GITHUB_OWNER ?? fileGithub.owner,
-      repo: process.env.GITHUB_REPO ?? fileGithub.repo,
-      token: process.env.GITHUB_TOKEN ?? fileGithub.token,
-      appId: parseIntEnv('GITHUB_APP_ID') ?? fileGithub.appId,
-      privateKeyPath: process.env.GITHUB_APP_PEM_PATH ?? fileGithub.privateKeyPath,
-      installationId: parseIntEnv('GITHUB_APP_INSTALLATION_ID') ?? fileGithub.installationId,
+      owner: process.env.GITHUB_OWNER,
+      repo: process.env.GITHUB_REPO,
+      token: process.env.GITHUB_TOKEN,
+      appId: parseIntEnv('GITHUB_APP_ID'),
+      privateKeyPath: process.env.GITHUB_APP_PEM_PATH,
+      installationId: parseIntEnv('GITHUB_APP_INSTALLATION_ID'),
     },
     llm: {
-      provider: process.env.LLM_PROVIDER ?? fileLlm.provider,
-      apiKey: process.env.LLM_API_KEY ?? fileLlm.apiKey,
-      model: process.env.LLM_MODEL ?? fileLlm.model,
-      baseUrl: process.env.LLM_BASE_URL ?? fileLlm.baseUrl,
+      provider: process.env.LLM_PROVIDER,
+      apiKey: process.env.LLM_API_KEY,
+      model: process.env.LLM_MODEL,
+      baseUrl: process.env.LLM_BASE_URL || null,
     },
-    maxIssuesPerRun: parseIntEnv('MAX_ISSUES_PER_RUN') ?? fileConfig.maxIssuesPerRun,
-    maxToolCallsPerRun: parseIntEnv('MAX_TOOL_CALLS_PER_RUN') ?? fileConfig.maxToolCallsPerRun,
+    maxIssuesPerRun: parseIntEnv('MAX_ISSUES_PER_RUN'),
+    maxToolCallsPerRun: parseIntEnv('MAX_TOOL_CALLS_PER_RUN'),
   };
 
-  // triageLlm: env vars (all-or-nothing) ?? config.json
-  const triageFromEnv = readLlmFromEnv('TRIAGE_LLM');
-  config.triageLlm = triageFromEnv ?? fileConfig.triageLlm;
+  // triageLlm (all-or-nothing: only if PROVIDER is set)
+  config.triageLlm = readLlmFromEnv('TRIAGE_LLM');
 
-  // reviewerLlm: env vars (all-or-nothing) ?? config.json
-  const reviewerFromEnv = readLlmFromEnv('REVIEWER_LLM');
-  config.reviewerLlm = reviewerFromEnv ?? fileConfig.reviewerLlm;
+  // reviewerLlm (all-or-nothing: only if PROVIDER is set)
+  config.reviewerLlm = readLlmFromEnv('REVIEWER_LLM');
 
-  // webhook: env vars ?? config.json
+  // webhook
   const webhookPort = parseIntEnv('WEBHOOK_PORT');
   const webhookSecret = process.env.WEBHOOK_SECRET;
   if (webhookPort !== undefined || webhookSecret) {
     config.webhook = {
-      port: webhookPort ?? fileConfig.webhook?.port,
-      secret: webhookSecret ?? fileConfig.webhook?.secret,
+      port: webhookPort,
+      secret: webhookSecret,
     };
-  } else {
-    config.webhook = fileConfig.webhook;
   }
 
-  // 3. Validate required fields
+  // Validate required fields
   if (!config.github.owner || !config.github.repo) {
-    console.error('❌ Missing required GitHub config: owner, repo. Set GITHUB_OWNER/GITHUB_REPO env vars or provide config.json.');
+    console.error('❌ Missing required config: GITHUB_OWNER and GITHUB_REPO. Copy .env.example to .env and fill in your credentials.');
     process.exit(1);
   }
 
@@ -114,12 +95,12 @@ export function loadConfig() {
   const appFieldCount = [hasAppId, hasPrivateKeyPath, hasInstallationId].filter(Boolean).length;
 
   if (!hasToken && appFieldCount === 0) {
-    console.error('❌ Missing GitHub auth: provide either token (PAT) or appId + privateKeyPath + installationId (GitHub App)');
+    console.error('❌ Missing GitHub auth: set GITHUB_TOKEN or GITHUB_APP_ID + GITHUB_APP_PEM_PATH + GITHUB_APP_INSTALLATION_ID');
     process.exit(1);
   }
 
   if (!hasToken && appFieldCount > 0 && appFieldCount < 3) {
-    console.error('❌ Incomplete GitHub App config: all three fields required (appId, privateKeyPath, installationId)');
+    console.error('❌ Incomplete GitHub App config: all three required (GITHUB_APP_ID, GITHUB_APP_PEM_PATH, GITHUB_APP_INSTALLATION_ID)');
     process.exit(1);
   }
 
@@ -133,18 +114,18 @@ export function loadConfig() {
   // LLM validation
   const localProviders = ['ollama', 'openai-compatible'];
   if (!config.llm.apiKey && !localProviders.includes(config.llm.provider)) {
-    console.error('❌ Missing LLM API key');
+    console.error('❌ Missing LLM_API_KEY (required for cloud providers)');
     process.exit(1);
   }
 
   // triageLlm validation
   if (config.triageLlm) {
     if (!config.triageLlm.provider) {
-      console.error('❌ triageLlm.provider is required when triageLlm is specified');
+      console.error('❌ TRIAGE_LLM_PROVIDER is required when any TRIAGE_LLM_* vars are set');
       process.exit(1);
     }
     if (!config.triageLlm.apiKey && !localProviders.includes(config.triageLlm.provider)) {
-      console.error('❌ Missing triageLlm API key');
+      console.error('❌ Missing TRIAGE_LLM_API_KEY (required for cloud providers)');
       process.exit(1);
     }
   }
@@ -152,11 +133,11 @@ export function loadConfig() {
   // reviewerLlm validation
   if (config.reviewerLlm) {
     if (!config.reviewerLlm.provider) {
-      console.error('❌ reviewerLlm.provider is required when reviewerLlm is specified');
+      console.error('❌ REVIEWER_LLM_PROVIDER is required when any REVIEWER_LLM_* vars are set');
       process.exit(1);
     }
     if (!config.reviewerLlm.apiKey && !localProviders.includes(config.reviewerLlm.provider)) {
-      console.error('❌ Missing reviewerLlm API key');
+      console.error('❌ Missing REVIEWER_LLM_API_KEY (required for cloud providers)');
       process.exit(1);
     }
   }
@@ -164,19 +145,19 @@ export function loadConfig() {
   // webhook validation
   if (config.webhook) {
     if (typeof config.webhook.port !== 'number' || config.webhook.port < 1 || config.webhook.port > 65535) {
-      console.error('❌ webhook.port must be a number between 1 and 65535');
+      console.error('❌ WEBHOOK_PORT must be a number between 1 and 65535');
       process.exit(1);
     }
     if (!config.webhook.secret || typeof config.webhook.secret !== 'string') {
-      console.error('❌ webhook.secret is required when webhook is configured');
+      console.error('❌ WEBHOOK_SECRET is required when WEBHOOK_PORT is set');
       process.exit(1);
     }
   }
 
   // localhost-https warnings
-  warnLocalhostHttps('llm', config.llm.baseUrl);
-  if (config.triageLlm) warnLocalhostHttps('triageLlm', config.triageLlm.baseUrl);
-  if (config.reviewerLlm) warnLocalhostHttps('reviewerLlm', config.reviewerLlm.baseUrl);
+  warnLocalhostHttps('LLM_BASE_URL', config.llm.baseUrl);
+  if (config.triageLlm) warnLocalhostHttps('TRIAGE_LLM_BASE_URL', config.triageLlm.baseUrl);
+  if (config.reviewerLlm) warnLocalhostHttps('REVIEWER_LLM_BASE_URL', config.reviewerLlm.baseUrl);
 
   return config;
 }

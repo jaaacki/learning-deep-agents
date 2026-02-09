@@ -59,14 +59,14 @@ const POLL_STATE_FILE = path.resolve('./last_poll.json');
 
 /**
  * Maximum number of issues to process per run (default).
- * Can be overridden via config.json or --max-issues CLI flag.
+ * Can be overridden via MAX_ISSUES_PER_RUN env var or --max-issues CLI flag.
  */
 const DEFAULT_MAX_ISSUES_PER_RUN = 5;
 
 /**
  * Maximum number of tool calls per run (default).
  * Prevents runaway agent loops from burning API credits.
- * Can be overridden via config.json or --max-tool-calls CLI flag.
+ * Can be overridden via MAX_TOOL_CALLS_PER_RUN env var or --max-tool-calls CLI flag.
  */
 const DEFAULT_MAX_TOOL_CALLS_PER_RUN = 30;
 

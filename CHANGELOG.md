@@ -13,24 +13,25 @@
 
 **Consolidate configuration into `.env` as single source of truth (Issue #47).**
 
-During a real setup session, multiple pain points were discovered: secrets scattered across `config.json`, `.env`, and `Caddyfile`; unclear `triageLlm`/`reviewerLlm` shape; `privateKeyPath` confusion between host/container; Ollama `https` vs `http` gotcha. This release makes `.env` the primary configuration method while keeping `config.json` as a backward-compatible fallback.
+During a real setup session, multiple pain points were discovered: secrets scattered across `config.json`, `.env`, and `Caddyfile`; unclear `triageLlm`/`reviewerLlm` shape; `privateKeyPath` confusion between host/container; Ollama `https` vs `http` gotcha. This release replaces `config.json` entirely with `.env` as the single source of truth.
 
 ### Added
-- **Environment variable configuration** — all config fields can now be set via env vars
+- **Environment variable configuration** — `.env` is now the only config method
 - `readLlmFromEnv()`, `parseIntEnv()`, `warnLocalhostHttps()` helper functions in `config.ts`
 - Localhost-HTTPS detection: warns when `baseUrl` uses `https://localhost` or `https://127.0.0.1` (common Ollama gotcha)
-- Info log when `config.json` is absent but env vars are sufficient
 - Comprehensive `.env.example` template covering all config sections
-- 12 new tests for env var loading, overrides, type parsing, and localhost-HTTPS warnings (269 total)
+- Config tests rewritten: env-var-only, no config.json mocking
 
 ### Changed
-- `loadConfig()` now reads env vars first, falls back to `config.json` (nullish coalescing merge)
-- `config.json` is no longer required — the bot can run entirely from env vars
-- Error messages updated to mention env vars (e.g., "Set GITHUB_OWNER/GITHUB_REPO env vars or provide config.json")
+- `loadConfig()` reads entirely from `process.env` — no JSON file reading
+- Error messages reference env var names (e.g., "Set GITHUB_OWNER and GITHUB_REPO in .env")
 - `Caddyfile.example` uses `{$DOMAIN}` env var — now committable with no secrets
 - `docker-compose.yml`: `env_file: .env` on both services, mounts `Caddyfile.example` directly
-- `Caddyfile` removed from `.gitignore` (no longer needed as a user-created file)
-- README updated: `.env` as primary setup method, env var mapping table, updated troubleshooting
+
+### Removed
+- `config.json` support — no longer read or referenced
+- `config.json.example` — deleted from repository
+- `config.json` and `Caddyfile` removed from `.gitignore`
 
 ---
 

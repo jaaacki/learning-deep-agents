@@ -59,10 +59,6 @@ pnpm install
 
 ### 2. Configure credentials
 
-There are two ways to configure the bot. You can use either one or both (env vars override config.json).
-
-#### Option A: Environment variables (recommended)
-
 ```bash
 cp .env.example .env
 ```
@@ -95,85 +91,10 @@ LLM_MODEL=claude-sonnet-4-20250514
 
 See `.env.example` for the full list including GitHub App auth, limits, and Docker/Caddy settings.
 
-#### Option B: config.json (legacy)
-
-```bash
-cp config.json.example config.json
-```
-
-Edit `config.json`. Here is the full config with all available fields:
-
-```jsonc
-{
-  "github": {
-    "owner": "your-github-username",
-    "repo": "your-repo-name",
-
-    // Auth option 1: Personal Access Token
-    "token": "ghp_xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx",
-
-    // Auth option 2: GitHub App (remove token above if using this)
-    // All three fields are required when using App auth
-    "appId": null,              // number — from your App's General page
-    "privateKeyPath": null,     // string — path to .pem file (never commit this!)
-    "installationId": null      // number — from the installation URL
-  },
-  "llm": {
-    "provider": "anthropic",    // "anthropic" | "openai" | "ollama" | "openai-compatible"
-    "apiKey": "sk-ant-xxx",     // required for cloud providers, null for ollama
-    "model": "claude-sonnet-4-20250514",
-    "baseUrl": null             // only needed for openai-compatible
-  },
-
-  // Optional: cheaper/faster model for issue triage (same shape as llm above)
-  // Set to null to use the main llm for triage
-  "triageLlm": {
-    "provider": "anthropic",
-    "apiKey": "sk-ant-xxx",
-    "model": "claude-haiku-4-5-20251001",
-    "baseUrl": null
-  },
-
-  // Optional: different model for PR reviews (same shape as llm above)
-  // Set to null to use the main llm for reviews
-  "reviewerLlm": {
-    "provider": "anthropic",
-    "apiKey": "sk-ant-xxx",
-    "model": "claude-haiku-4-5-20251001",
-    "baseUrl": null
-  }
-
-  // Optional: required only for `pnpm webhook` and Docker deployment
-  "webhook": {
-    "port": 3000,
-    "secret": "your-webhook-secret"   // must match the secret in GitHub webhook settings
-  },
-
-  "maxIssuesPerRun": 5,     // cap issues processed per poll cycle (default: 5)
-  "maxToolCallsPerRun": 30  // circuit breaker — exits with code 2 when tripped
-}
-```
-
-**Env var / config.json mapping:**
-
-| Env var | config.json path |
-|---------|-----------------|
-| `GITHUB_OWNER` | `github.owner` |
-| `GITHUB_REPO` | `github.repo` |
-| `GITHUB_TOKEN` | `github.token` |
-| `GITHUB_APP_ID` | `github.appId` |
-| `GITHUB_APP_PEM_PATH` | `github.privateKeyPath` |
-| `GITHUB_APP_INSTALLATION_ID` | `github.installationId` |
-| `LLM_PROVIDER` / `LLM_API_KEY` / `LLM_MODEL` / `LLM_BASE_URL` | `llm.*` |
-| `TRIAGE_LLM_PROVIDER` / `_API_KEY` / `_MODEL` / `_BASE_URL` | `triageLlm.*` |
-| `REVIEWER_LLM_PROVIDER` / `_API_KEY` / `_MODEL` / `_BASE_URL` | `reviewerLlm.*` |
-| `WEBHOOK_PORT` / `WEBHOOK_SECRET` | `webhook.*` |
-| `MAX_ISSUES_PER_RUN` / `MAX_TOOL_CALLS_PER_RUN` | top-level |
-
-**Field notes:**
-- `triageLlm` / `reviewerLlm` have the **same shape** as `llm` (`provider`, `apiKey`, `model`, `baseUrl`). Set to `null` (or omit env vars) to use the main `llm` for everything.
-- `maxIssuesPerRun` caps how many issues the agent processes per invocation. Lower this for busy repos or higher LLM costs.
-- `maxToolCallsPerRun` is a circuit breaker that caps total tool calls per run. If the agent enters a loop, this stops it from burning unlimited API credits.
+**Notes:**
+- `TRIAGE_LLM_*` / `REVIEWER_LLM_*` are optional — omit them to use the main LLM for everything. Set `_PROVIDER` to enable.
+- `MAX_ISSUES_PER_RUN` caps how many issues the agent processes per invocation. Lower this for busy repos or higher LLM costs.
+- `MAX_TOOL_CALLS_PER_RUN` is a circuit breaker that caps total tool calls per run. If the agent enters a loop, this stops it from burning unlimited API credits.
 
 #### Other LLM providers
 
@@ -188,13 +109,6 @@ LLM_PROVIDER=ollama  LLM_MODEL=llama3
 LLM_PROVIDER=openai-compatible  LLM_API_KEY=key-or-empty  LLM_MODEL=my-model  LLM_BASE_URL=http://localhost:1234/v1
 ```
 
-Or equivalently in config.json:
-```json
-{ "provider": "openai", "apiKey": "sk-...", "model": "gpt-4", "baseUrl": null }
-{ "provider": "ollama", "apiKey": null, "model": "llama3", "baseUrl": null }
-{ "provider": "openai-compatible", "apiKey": "key-or-null", "model": "my-model", "baseUrl": "http://localhost:1234/v1" }
-```
-
 **Tip:** Point it at a repo you own that has a few open issues. If you don't have one, create a test repo with 2-3 dummy issues.
 
 ### 3. GitHub Authentication
@@ -207,14 +121,10 @@ You need **one** of the two methods below. A Personal Access Token is simpler fo
 2. Click **Generate new token (classic)**
 3. Select the **`repo`** scope (full control of private repositories)
 4. Click **Generate token** and copy it immediately (you won't see it again)
-5. Paste the token into `config.json` → `github.token`
+5. Paste the token into `.env` → `GITHUB_TOKEN`
 
-```json
-"github": {
-  "owner": "your-username",
-  "repo": "your-repo",
-  "token": "ghp_xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"
-}
+```bash
+GITHUB_TOKEN=ghp_xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
 ```
 
 #### GitHub App
@@ -237,16 +147,13 @@ A GitHub App uses short-lived installation tokens and doesn't tie permissions to
    - **Never commit this file**
 7. Click **Install App** (left sidebar) → install it on the repo you want the bot to manage
 8. After installation, the URL will look like `https://github.com/settings/installations/12345678` — the number at the end is your **Installation ID**
-9. Fill in `config.json` (remove the `token` field):
+9. Fill in `.env` (comment out `GITHUB_TOKEN` if set):
 
-```json
-"github": {
-  "owner": "your-username",
-  "repo": "your-repo",
-  "appId": 123456,
-  "privateKeyPath": "/home/you/.config/deep-agents/app.pem",
-  "installationId": 12345678
-}
+```bash
+# GITHUB_TOKEN=          # comment out PAT when using App auth
+GITHUB_APP_ID=123456
+GITHUB_APP_PEM_PATH=/home/you/.config/deep-agents/app.pem
+GITHUB_APP_INSTALLATION_ID=12345678
 ```
 
 ### 4. Test a single run
@@ -347,7 +254,7 @@ Add this line (polls every 15 minutes):
 
 The webhook listener receives GitHub events in real-time instead of polling on a schedule. It processes `issues.opened` and `pull_request.opened` events.
 
-**Prerequisites:** Webhook config must be set — either `WEBHOOK_PORT`/`WEBHOOK_SECRET` env vars or `webhook` section in `config.json` (see [config above](#2-configure-credentials)).
+**Prerequisites:** `WEBHOOK_PORT` and `WEBHOOK_SECRET` must be set in `.env` (see [config above](#2-configure-credentials)).
 
 Generate a strong webhook secret:
 
@@ -356,7 +263,7 @@ openssl rand -hex 32
 ```
 
 Paste the output into both:
-1. `.env` → `WEBHOOK_SECRET` (or `config.json` → `webhook.secret`)
+1. `.env` → `WEBHOOK_SECRET`
 2. Your GitHub repo's webhook settings (Settings → Webhooks → Add webhook):
    - **Payload URL:** `http://your-server:3000/webhook` (or use a tunnel like ngrok for local dev)
    - **Content type:** `application/json`
@@ -380,7 +287,7 @@ Run the webhook listener in Docker. Two options: **local testing** (bot only) or
 #### Prerequisites
 
 - [Docker](https://docs.docker.com/get-docker/) and Docker Compose
-- `.env` with valid credentials including `WEBHOOK_PORT`/`WEBHOOK_SECRET` (or `config.json` with webhook section)
+- `.env` with valid credentials including `WEBHOOK_PORT` and `WEBHOOK_SECRET`
 
 #### Create runtime files
 
@@ -484,7 +391,7 @@ curl https://yourdomain.com/health
 In your GitHub repo settings, add a webhook:
 - **Payload URL:** `https://yourdomain.com/webhook`
 - **Content type:** `application/json`
-- **Secret:** same value as `WEBHOOK_SECRET` in your `.env` (or `webhook.secret` in `config.json`)
+- **Secret:** same value as `WEBHOOK_SECRET` in your `.env`
 - **Events:** select "Issues" and "Pull requests"
 
 #### Stopping
@@ -546,24 +453,24 @@ pnpm test
 pnpm run test:watch
 ```
 
-269 tests across 9 test files using [vitest](https://vitest.dev/) with mocked external dependencies (Octokit, LLM constructors, filesystem). No real API calls are made during testing.
+259 tests across 9 test files using [vitest](https://vitest.dev/) with mocked external dependencies (Octokit, LLM constructors, filesystem). No real API calls are made during testing.
 
 ## Troubleshooting
 
 | Problem | Fix |
 |---------|-----|
-| `Missing required GitHub config` | Set `GITHUB_OWNER`/`GITHUB_REPO` env vars or create `config.json` from the example |
-| `Missing LLM API key` | Set `LLM_API_KEY` env var or add your key to `config.json` |
+| `Missing required config` | Set `GITHUB_OWNER` and `GITHUB_REPO` in `.env` |
+| `Missing LLM_API_KEY` | Set `LLM_API_KEY` in `.env` (required for cloud providers, not needed for Ollama) |
 | `Error fetching issues: HttpError` | Check your GitHub token has `repo` scope |
 | `Error creating branch: Not Found` | Make sure the repo has a `main` branch (not `master`) |
 | `Error creating pull request: Validation Failed` | Branch might already exist from a previous run |
 | Agent doesn't comment/create PR | Check console output for API errors; token might lack permissions |
 | `poll.sh: pnpm: command not found` | Uncomment the correct PATH line in `poll.sh` |
-| `Incomplete GitHub App config` | All three fields required: `appId`, `privateKeyPath`, `installationId` |
-| `GitHub App private key file not found` | Check `privateKeyPath` points to a valid `.pem` file |
-| Webhook returns 401 / signature mismatch | Ensure `WEBHOOK_SECRET` (or `webhook.secret` in config.json) matches the secret in GitHub webhook settings exactly |
+| `Incomplete GitHub App config` | All three required: `GITHUB_APP_ID`, `GITHUB_APP_PEM_PATH`, `GITHUB_APP_INSTALLATION_ID` |
+| `GitHub App private key file not found` | Check `GITHUB_APP_PEM_PATH` points to a valid `.pem` file |
+| Webhook returns 401 / signature mismatch | Ensure `WEBHOOK_SECRET` in `.env` matches the secret in GitHub webhook settings exactly |
 | Webhook not firing | In GitHub repo → Settings → Webhooks, check that "Issues" and "Pull requests" events are selected |
-| `EADDRINUSE` when starting webhook | Another process is using the port; change `WEBHOOK_PORT` (or `webhook.port` in config) or stop the other process |
+| `EADDRINUSE` when starting webhook | Another process is using the port; change `WEBHOOK_PORT` in `.env` or stop the other process |
 | `HTTPS for localhost` warning | You have `https://localhost` as a baseUrl — Ollama and local models use `http://`, not `https://` |
 | Caddy fails to get TLS cert | Check `CLOUDFLARE_API_TOKEN` is set in `.env` and the token has Zone/DNS permissions |
 
@@ -575,7 +482,7 @@ learning-deep-agents/
     cli.ts            -- CLI entry point (subcommands: poll, analyze, triage, review, webhook, status)
     core.ts           -- Shared logic (poll cycle, state management, graceful shutdown)
     index.ts          -- Original entry point (thin wrapper, backwards-compatible)
-    config.ts         -- Loads config from env vars and/or config.json (GitHub + LLM + webhook)
+    config.ts         -- Loads config from .env (GitHub + LLM + webhook)
     model.ts          -- LLM provider factory (Anthropic, OpenAI, Ollama, etc.)
     github-tools.ts   -- GitHub API tools (fetch, list files, comment, branch, PR, commit, review)
     agent.ts          -- Creates the analysis agent with tools + system prompt
@@ -597,8 +504,6 @@ learning-deep-agents/
   issues/             -- Generated: detailed analysis files
   .env                -- Your credentials and settings (git-ignored, single source of truth)
   .env.example        -- Comprehensive template for .env
-  config.json         -- Optional fallback credentials (git-ignored, env vars override)
-  config.json.example -- Template for config.json
   last_poll.json      -- Generated: polling state (git-ignored)
   poll.sh             -- Cron wrapper script
   poll.log            -- Generated: cron run logs (git-ignored)

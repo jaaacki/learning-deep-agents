@@ -20,12 +20,20 @@ const CONFIG_ENV_VARS = [
   'MAX_ISSUES_PER_RUN', 'MAX_TOOL_CALLS_PER_RUN',
 ];
 
+/** Set the minimum required env vars for a valid config */
+function setValidEnv() {
+  process.env.GITHUB_OWNER = 'test-owner';
+  process.env.GITHUB_REPO = 'test-repo';
+  process.env.GITHUB_TOKEN = 'ghp_test123';
+  process.env.LLM_PROVIDER = 'anthropic';
+  process.env.LLM_API_KEY = 'sk-ant-test';
+  process.env.LLM_MODEL = 'claude-sonnet-4-20250514';
+}
+
 beforeEach(() => {
   vi.spyOn(fs, 'existsSync');
-  vi.spyOn(fs, 'readFileSync');
   vi.spyOn(console, 'error').mockImplementation(() => {});
   vi.spyOn(console, 'warn').mockImplementation(() => {});
-  vi.spyOn(console, 'info').mockImplementation(() => {});
   mockExit.mockClear();
   // Clean all config env vars to prevent cross-test bleed
   for (const key of CONFIG_ENV_VARS) {
@@ -43,46 +51,41 @@ afterEach(() => {
 // ── loadConfig ────────────────────────────────────────────────────────────────
 
 describe('loadConfig', () => {
-  const validConfig = {
-    github: { owner: 'test-owner', repo: 'test-repo', token: 'ghp_test123' },
-    llm: { provider: 'anthropic', apiKey: 'sk-ant-test', model: 'claude-sonnet-4-20250514' },
-  };
-
-  it('returns config when all required fields are present', () => {
-    vi.mocked(fs.existsSync).mockReturnValue(true);
-    vi.mocked(fs.readFileSync).mockReturnValue(JSON.stringify(validConfig));
+  it('returns config when all required env vars are set', () => {
+    setValidEnv();
 
     const config = loadConfig();
 
     expect(config.github.owner).toBe('test-owner');
     expect(config.github.repo).toBe('test-repo');
+    expect(config.github.token).toBe('ghp_test123');
     expect(config.llm.provider).toBe('anthropic');
+    expect(config.llm.apiKey).toBe('sk-ant-test');
   });
 
-  it('exits when neither config.json nor env vars provide required fields', () => {
-    vi.mocked(fs.existsSync).mockReturnValue(false);
+  it('exits when GITHUB_OWNER is missing', () => {
+    setValidEnv();
+    delete process.env.GITHUB_OWNER;
 
     expect(() => loadConfig()).toThrow('process.exit');
     expect(console.error).toHaveBeenCalledWith(
-      expect.stringContaining('Missing required GitHub config')
+      expect.stringContaining('GITHUB_OWNER')
     );
   });
 
-  it('exits when github.owner is missing', () => {
-    const bad = { ...validConfig, github: { ...validConfig.github, owner: '' } };
-    vi.mocked(fs.existsSync).mockReturnValue(true);
-    vi.mocked(fs.readFileSync).mockReturnValue(JSON.stringify(bad));
+  it('exits when GITHUB_REPO is missing', () => {
+    setValidEnv();
+    delete process.env.GITHUB_REPO;
 
     expect(() => loadConfig()).toThrow('process.exit');
     expect(console.error).toHaveBeenCalledWith(
-      expect.stringContaining('Missing required GitHub config')
+      expect.stringContaining('GITHUB_OWNER')
     );
   });
 
-  it('exits when github.token is missing and no app fields', () => {
-    const bad = { ...validConfig, github: { ...validConfig.github, token: '' } };
-    vi.mocked(fs.existsSync).mockReturnValue(true);
-    vi.mocked(fs.readFileSync).mockReturnValue(JSON.stringify(bad));
+  it('exits when no auth env vars are set', () => {
+    setValidEnv();
+    delete process.env.GITHUB_TOKEN;
 
     expect(() => loadConfig()).toThrow('process.exit');
     expect(console.error).toHaveBeenCalledWith(
@@ -90,385 +93,39 @@ describe('loadConfig', () => {
     );
   });
 
-  it('exits when LLM API key is missing for cloud providers', () => {
-    const bad = { ...validConfig, llm: { ...validConfig.llm, apiKey: '' } };
-    vi.mocked(fs.existsSync).mockReturnValue(true);
-    vi.mocked(fs.readFileSync).mockReturnValue(JSON.stringify(bad));
+  it('exits when LLM_API_KEY is missing for cloud providers', () => {
+    setValidEnv();
+    delete process.env.LLM_API_KEY;
 
     expect(() => loadConfig()).toThrow('process.exit');
     expect(console.error).toHaveBeenCalledWith(
-      expect.stringContaining('Missing LLM API key')
+      expect.stringContaining('LLM_API_KEY')
     );
   });
 
-  it('does NOT exit when API key is missing for ollama', () => {
-    const ollamaConfig = {
-      ...validConfig,
-      llm: { provider: 'ollama', apiKey: '', model: 'llama3' },
-    };
-    vi.mocked(fs.existsSync).mockReturnValue(true);
-    vi.mocked(fs.readFileSync).mockReturnValue(JSON.stringify(ollamaConfig));
+  it('does NOT exit when LLM_API_KEY is missing for ollama', () => {
+    setValidEnv();
+    process.env.LLM_PROVIDER = 'ollama';
+    delete process.env.LLM_API_KEY;
 
     const config = loadConfig();
     expect(config.llm.provider).toBe('ollama');
   });
 
-  it('does NOT exit when API key is missing for openai-compatible', () => {
-    const compatConfig = {
-      ...validConfig,
-      llm: { provider: 'openai-compatible', apiKey: '', model: 'model', baseUrl: 'http://localhost:1234/v1' },
-    };
-    vi.mocked(fs.existsSync).mockReturnValue(true);
-    vi.mocked(fs.readFileSync).mockReturnValue(JSON.stringify(compatConfig));
+  it('does NOT exit when LLM_API_KEY is missing for openai-compatible', () => {
+    setValidEnv();
+    process.env.LLM_PROVIDER = 'openai-compatible';
+    delete process.env.LLM_API_KEY;
+    process.env.LLM_BASE_URL = 'http://localhost:1234/v1';
 
     const config = loadConfig();
     expect(config.llm.provider).toBe('openai-compatible');
   });
 
-  it('accepts config with triageLlm specified', () => {
-    const triageConfig = {
-      ...validConfig,
-      triageLlm: { provider: 'anthropic', apiKey: 'sk-ant-triage', model: 'claude-haiku-4-5-20251001' },
-    };
-    vi.mocked(fs.existsSync).mockReturnValue(true);
-    vi.mocked(fs.readFileSync).mockReturnValue(JSON.stringify(triageConfig));
+  // ── triageLlm ───────────────────────────────────────────────────────────────
 
-    const config = loadConfig();
-    expect(config.triageLlm.provider).toBe('anthropic');
-    expect(config.triageLlm.model).toBe('claude-haiku-4-5-20251001');
-  });
-
-  it('accepts config without triageLlm (falls back to main llm)', () => {
-    vi.mocked(fs.existsSync).mockReturnValue(true);
-    vi.mocked(fs.readFileSync).mockReturnValue(JSON.stringify(validConfig));
-
-    const config = loadConfig();
-    expect(config.triageLlm).toBeUndefined();
-  });
-
-  it('exits when triageLlm.provider is missing', () => {
-    const bad = {
-      ...validConfig,
-      triageLlm: { provider: '', apiKey: 'sk-ant-triage', model: 'claude-haiku' },
-    };
-    vi.mocked(fs.existsSync).mockReturnValue(true);
-    vi.mocked(fs.readFileSync).mockReturnValue(JSON.stringify(bad));
-
-    expect(() => loadConfig()).toThrow('process.exit');
-    expect(console.error).toHaveBeenCalledWith(
-      expect.stringContaining('triageLlm.provider is required')
-    );
-  });
-
-  it('exits when triageLlm API key is missing for cloud providers', () => {
-    const bad = {
-      ...validConfig,
-      triageLlm: { provider: 'anthropic', apiKey: '', model: 'claude-haiku' },
-    };
-    vi.mocked(fs.existsSync).mockReturnValue(true);
-    vi.mocked(fs.readFileSync).mockReturnValue(JSON.stringify(bad));
-
-    expect(() => loadConfig()).toThrow('process.exit');
-    expect(console.error).toHaveBeenCalledWith(
-      expect.stringContaining('Missing triageLlm API key')
-    );
-  });
-
-  it('does NOT exit when triageLlm API key is missing for ollama', () => {
-    const triageOllama = {
-      ...validConfig,
-      triageLlm: { provider: 'ollama', apiKey: '', model: 'llama3' },
-    };
-    vi.mocked(fs.existsSync).mockReturnValue(true);
-    vi.mocked(fs.readFileSync).mockReturnValue(JSON.stringify(triageOllama));
-
-    const config = loadConfig();
-    expect(config.triageLlm.provider).toBe('ollama');
-  });
-
-  // ── reviewerLlm config validation ────────────────────────────────────────
-
-  it('accepts config with reviewerLlm specified', () => {
-    const reviewerConfig = {
-      ...validConfig,
-      reviewerLlm: { provider: 'openai', apiKey: 'sk-openai-test', model: 'gpt-4' },
-    };
-    vi.mocked(fs.existsSync).mockReturnValue(true);
-    vi.mocked(fs.readFileSync).mockReturnValue(JSON.stringify(reviewerConfig));
-
-    const config = loadConfig();
-    expect(config.reviewerLlm.provider).toBe('openai');
-    expect(config.reviewerLlm.model).toBe('gpt-4');
-  });
-
-  it('exits when reviewerLlm.provider is missing', () => {
-    const bad = {
-      ...validConfig,
-      reviewerLlm: { provider: '', apiKey: 'sk-test', model: 'gpt-4' },
-    };
-    vi.mocked(fs.existsSync).mockReturnValue(true);
-    vi.mocked(fs.readFileSync).mockReturnValue(JSON.stringify(bad));
-
-    expect(() => loadConfig()).toThrow('process.exit');
-    expect(console.error).toHaveBeenCalledWith(
-      expect.stringContaining('reviewerLlm.provider is required')
-    );
-  });
-
-  it('exits when reviewerLlm API key is missing for cloud providers', () => {
-    const bad = {
-      ...validConfig,
-      reviewerLlm: { provider: 'anthropic', apiKey: '', model: 'claude-sonnet' },
-    };
-    vi.mocked(fs.existsSync).mockReturnValue(true);
-    vi.mocked(fs.readFileSync).mockReturnValue(JSON.stringify(bad));
-
-    expect(() => loadConfig()).toThrow('process.exit');
-    expect(console.error).toHaveBeenCalledWith(
-      expect.stringContaining('Missing reviewerLlm API key')
-    );
-  });
-
-  // ── webhook config validation ──────────────────────────────────────────────
-
-  it('accepts config with valid webhook section', () => {
-    const webhookConfig = {
-      ...validConfig,
-      webhook: { port: 3000, secret: 'my-webhook-secret' },
-    };
-    vi.mocked(fs.existsSync).mockReturnValue(true);
-    vi.mocked(fs.readFileSync).mockReturnValue(JSON.stringify(webhookConfig));
-
-    const config = loadConfig();
-    expect(config.webhook.port).toBe(3000);
-    expect(config.webhook.secret).toBe('my-webhook-secret');
-  });
-
-  it('accepts config without webhook section', () => {
-    vi.mocked(fs.existsSync).mockReturnValue(true);
-    vi.mocked(fs.readFileSync).mockReturnValue(JSON.stringify(validConfig));
-
-    const config = loadConfig();
-    expect(config.webhook).toBeUndefined();
-  });
-
-  it('exits when webhook.port is out of range', () => {
-    const bad = {
-      ...validConfig,
-      webhook: { port: 99999, secret: 'secret' },
-    };
-    vi.mocked(fs.existsSync).mockReturnValue(true);
-    vi.mocked(fs.readFileSync).mockReturnValue(JSON.stringify(bad));
-
-    expect(() => loadConfig()).toThrow('process.exit');
-    expect(console.error).toHaveBeenCalledWith(
-      expect.stringContaining('webhook.port must be a number between 1 and 65535')
-    );
-  });
-
-  it('exits when webhook.port is not a number', () => {
-    const bad = {
-      ...validConfig,
-      webhook: { port: 'abc', secret: 'secret' },
-    };
-    vi.mocked(fs.existsSync).mockReturnValue(true);
-    vi.mocked(fs.readFileSync).mockReturnValue(JSON.stringify(bad));
-
-    expect(() => loadConfig()).toThrow('process.exit');
-    expect(console.error).toHaveBeenCalledWith(
-      expect.stringContaining('webhook.port must be a number between 1 and 65535')
-    );
-  });
-
-  it('exits when webhook.secret is missing', () => {
-    const bad = {
-      ...validConfig,
-      webhook: { port: 3000, secret: '' },
-    };
-    vi.mocked(fs.existsSync).mockReturnValue(true);
-    vi.mocked(fs.readFileSync).mockReturnValue(JSON.stringify(bad));
-
-    expect(() => loadConfig()).toThrow('process.exit');
-    expect(console.error).toHaveBeenCalledWith(
-      expect.stringContaining('webhook.secret is required')
-    );
-  });
-
-  // ── GitHub App auth validation ──────────────────────────────────────────────
-
-  it('accepts config with only GitHub App fields (no PAT)', () => {
-    const appConfig = {
-      github: {
-        owner: 'test-owner',
-        repo: 'test-repo',
-        appId: 12345,
-        privateKeyPath: '/tmp/test-key.pem',
-        installationId: 67890,
-      },
-      llm: { provider: 'anthropic', apiKey: 'sk-ant-test', model: 'claude-sonnet-4-20250514' },
-    };
-    vi.mocked(fs.existsSync).mockReturnValue(true);
-    vi.mocked(fs.readFileSync).mockReturnValue(JSON.stringify(appConfig));
-
-    const config = loadConfig();
-    expect(config.github.appId).toBe(12345);
-    expect(config.github.installationId).toBe(67890);
-  });
-
-  it('accepts config with PAT (backwards-compatible, no app fields)', () => {
-    vi.mocked(fs.existsSync).mockReturnValue(true);
-    vi.mocked(fs.readFileSync).mockReturnValue(JSON.stringify(validConfig));
-
-    const config = loadConfig();
-    expect(config.github.token).toBe('ghp_test123');
-  });
-
-  it('exits when neither PAT nor App fields are provided', () => {
-    const bad = {
-      github: { owner: 'test-owner', repo: 'test-repo' },
-      llm: { provider: 'anthropic', apiKey: 'sk-ant-test', model: 'claude-sonnet-4-20250514' },
-    };
-    vi.mocked(fs.existsSync).mockReturnValue(true);
-    vi.mocked(fs.readFileSync).mockReturnValue(JSON.stringify(bad));
-
-    expect(() => loadConfig()).toThrow('process.exit');
-    expect(console.error).toHaveBeenCalledWith(
-      expect.stringContaining('Missing GitHub auth')
-    );
-  });
-
-  it('exits when partial App fields provided (appId but no privateKeyPath)', () => {
-    const bad = {
-      github: { owner: 'test-owner', repo: 'test-repo', appId: 12345 },
-      llm: { provider: 'anthropic', apiKey: 'sk-ant-test', model: 'claude-sonnet-4-20250514' },
-    };
-    vi.mocked(fs.existsSync).mockReturnValue(true);
-    vi.mocked(fs.readFileSync).mockReturnValue(JSON.stringify(bad));
-
-    expect(() => loadConfig()).toThrow('process.exit');
-    expect(console.error).toHaveBeenCalledWith(
-      expect.stringContaining('Incomplete GitHub App config')
-    );
-  });
-
-  it('exits when partial App fields provided (appId + privateKeyPath but no installationId)', () => {
-    const bad = {
-      github: { owner: 'test-owner', repo: 'test-repo', appId: 12345, privateKeyPath: '/tmp/key.pem' },
-      llm: { provider: 'anthropic', apiKey: 'sk-ant-test', model: 'claude-sonnet-4-20250514' },
-    };
-    vi.mocked(fs.existsSync).mockReturnValue(true);
-    vi.mocked(fs.readFileSync).mockReturnValue(JSON.stringify(bad));
-
-    expect(() => loadConfig()).toThrow('process.exit');
-    expect(console.error).toHaveBeenCalledWith(
-      expect.stringContaining('Incomplete GitHub App config')
-    );
-  });
-
-  it('exits when App private key file does not exist', () => {
-    const bad = {
-      github: {
-        owner: 'test-owner',
-        repo: 'test-repo',
-        appId: 12345,
-        privateKeyPath: '/nonexistent/key.pem',
-        installationId: 67890,
-      },
-      llm: { provider: 'anthropic', apiKey: 'sk-ant-test', model: 'claude-sonnet-4-20250514' },
-    };
-    // First call: config.json exists, second call: private key does not
-    vi.mocked(fs.existsSync).mockReturnValueOnce(true).mockReturnValueOnce(false);
-    vi.mocked(fs.readFileSync).mockReturnValue(JSON.stringify(bad));
-
-    expect(() => loadConfig()).toThrow('process.exit');
-    expect(console.error).toHaveBeenCalledWith(
-      expect.stringContaining('private key file not found')
-    );
-  });
-
-  it('accepts config with both PAT and App fields (PAT takes precedence via hasToken)', () => {
-    const bothConfig = {
-      github: {
-        owner: 'test-owner',
-        repo: 'test-repo',
-        token: 'ghp_test123',
-        appId: 12345,
-        privateKeyPath: '/tmp/key.pem',
-        installationId: 67890,
-      },
-      llm: { provider: 'anthropic', apiKey: 'sk-ant-test', model: 'claude-sonnet-4-20250514' },
-    };
-    vi.mocked(fs.existsSync).mockReturnValue(true);
-    vi.mocked(fs.readFileSync).mockReturnValue(JSON.stringify(bothConfig));
-
-    // Should not throw -- both are valid, PAT is present so no validation of app fields needed
-    const config = loadConfig();
-    expect(config.github.token).toBe('ghp_test123');
-  });
-
-  // ── env var loading ─────────────────────────────────────────────────────────
-
-  it('loads entirely from env vars when config.json is absent', () => {
-    vi.mocked(fs.existsSync).mockReturnValue(false);
-
-    process.env.GITHUB_OWNER = 'env-owner';
-    process.env.GITHUB_REPO = 'env-repo';
-    process.env.GITHUB_TOKEN = 'ghp_env_token';
-    process.env.LLM_PROVIDER = 'anthropic';
-    process.env.LLM_API_KEY = 'sk-ant-env';
-    process.env.LLM_MODEL = 'claude-sonnet-4-20250514';
-
-    const config = loadConfig();
-    expect(config.github.owner).toBe('env-owner');
-    expect(config.github.repo).toBe('env-repo');
-    expect(config.github.token).toBe('ghp_env_token');
-    expect(config.llm.provider).toBe('anthropic');
-    expect(config.llm.apiKey).toBe('sk-ant-env');
-    expect(console.info).toHaveBeenCalledWith(expect.stringContaining('config.json not found'));
-  });
-
-  it('env vars override config.json values', () => {
-    vi.mocked(fs.existsSync).mockReturnValue(true);
-    vi.mocked(fs.readFileSync).mockReturnValue(JSON.stringify(validConfig));
-
-    process.env.GITHUB_OWNER = 'override-owner';
-    process.env.LLM_MODEL = 'claude-opus-4-20250514';
-
-    const config = loadConfig();
-    expect(config.github.owner).toBe('override-owner');
-    expect(config.github.repo).toBe('test-repo'); // not overridden
-    expect(config.llm.model).toBe('claude-opus-4-20250514');
-  });
-
-  it('GITHUB_APP_ID and GITHUB_APP_INSTALLATION_ID are parsed as numbers', () => {
-    vi.mocked(fs.existsSync).mockReturnValue(false);
-
-    process.env.GITHUB_OWNER = 'env-owner';
-    process.env.GITHUB_REPO = 'env-repo';
-    process.env.GITHUB_APP_ID = '12345';
-    process.env.GITHUB_APP_PEM_PATH = '/tmp/test.pem';
-    process.env.GITHUB_APP_INSTALLATION_ID = '67890';
-    process.env.LLM_PROVIDER = 'anthropic';
-    process.env.LLM_API_KEY = 'sk-ant-env';
-
-    // PEM file must exist for validation
-    vi.mocked(fs.existsSync).mockImplementation((p: any) => {
-      if (p === './config.json') return false;
-      if (p === '/tmp/test.pem') return true;
-      return false;
-    });
-
-    const config = loadConfig();
-    expect(config.github.appId).toBe(12345);
-    expect(typeof config.github.appId).toBe('number');
-    expect(config.github.installationId).toBe(67890);
-    expect(typeof config.github.installationId).toBe('number');
-  });
-
-  it('TRIAGE_LLM_* env vars create triageLlm section', () => {
-    vi.mocked(fs.existsSync).mockReturnValue(true);
-    vi.mocked(fs.readFileSync).mockReturnValue(JSON.stringify(validConfig));
-
+  it('creates triageLlm when TRIAGE_LLM_PROVIDER is set', () => {
+    setValidEnv();
     process.env.TRIAGE_LLM_PROVIDER = 'anthropic';
     process.env.TRIAGE_LLM_API_KEY = 'sk-ant-triage';
     process.env.TRIAGE_LLM_MODEL = 'claude-haiku-4-5-20251001';
@@ -480,10 +137,36 @@ describe('loadConfig', () => {
     expect(config.triageLlm.model).toBe('claude-haiku-4-5-20251001');
   });
 
-  it('REVIEWER_LLM_* env vars create reviewerLlm section', () => {
-    vi.mocked(fs.existsSync).mockReturnValue(true);
-    vi.mocked(fs.readFileSync).mockReturnValue(JSON.stringify(validConfig));
+  it('triageLlm is undefined when TRIAGE_LLM_PROVIDER is not set', () => {
+    setValidEnv();
 
+    const config = loadConfig();
+    expect(config.triageLlm).toBeUndefined();
+  });
+
+  it('exits when TRIAGE_LLM_API_KEY is missing for cloud providers', () => {
+    setValidEnv();
+    process.env.TRIAGE_LLM_PROVIDER = 'anthropic';
+
+    expect(() => loadConfig()).toThrow('process.exit');
+    expect(console.error).toHaveBeenCalledWith(
+      expect.stringContaining('TRIAGE_LLM_API_KEY')
+    );
+  });
+
+  it('does NOT exit when TRIAGE_LLM_API_KEY is missing for ollama', () => {
+    setValidEnv();
+    process.env.TRIAGE_LLM_PROVIDER = 'ollama';
+    process.env.TRIAGE_LLM_MODEL = 'llama3';
+
+    const config = loadConfig();
+    expect(config.triageLlm.provider).toBe('ollama');
+  });
+
+  // ── reviewerLlm ─────────────────────────────────────────────────────────────
+
+  it('creates reviewerLlm when REVIEWER_LLM_PROVIDER is set', () => {
+    setValidEnv();
     process.env.REVIEWER_LLM_PROVIDER = 'openai';
     process.env.REVIEWER_LLM_API_KEY = 'sk-openai-rev';
     process.env.REVIEWER_LLM_MODEL = 'gpt-4';
@@ -495,22 +178,137 @@ describe('loadConfig', () => {
     expect(config.reviewerLlm.model).toBe('gpt-4');
   });
 
-  it('WEBHOOK_PORT and WEBHOOK_SECRET from env vars', () => {
-    vi.mocked(fs.existsSync).mockReturnValue(true);
-    vi.mocked(fs.readFileSync).mockReturnValue(JSON.stringify(validConfig));
+  it('exits when REVIEWER_LLM_API_KEY is missing for cloud providers', () => {
+    setValidEnv();
+    process.env.REVIEWER_LLM_PROVIDER = 'anthropic';
 
-    process.env.WEBHOOK_PORT = '4000';
-    process.env.WEBHOOK_SECRET = 'env-secret-123';
-
-    const config = loadConfig();
-    expect(config.webhook.port).toBe(4000);
-    expect(config.webhook.secret).toBe('env-secret-123');
+    expect(() => loadConfig()).toThrow('process.exit');
+    expect(console.error).toHaveBeenCalledWith(
+      expect.stringContaining('REVIEWER_LLM_API_KEY')
+    );
   });
 
-  it('MAX_ISSUES_PER_RUN and MAX_TOOL_CALLS_PER_RUN from env vars', () => {
-    vi.mocked(fs.existsSync).mockReturnValue(true);
-    vi.mocked(fs.readFileSync).mockReturnValue(JSON.stringify(validConfig));
+  // ── webhook ─────────────────────────────────────────────────────────────────
 
+  it('creates webhook config from WEBHOOK_PORT and WEBHOOK_SECRET', () => {
+    setValidEnv();
+    process.env.WEBHOOK_PORT = '3000';
+    process.env.WEBHOOK_SECRET = 'my-secret';
+
+    const config = loadConfig();
+    expect(config.webhook.port).toBe(3000);
+    expect(config.webhook.secret).toBe('my-secret');
+  });
+
+  it('webhook is undefined when neither WEBHOOK_PORT nor WEBHOOK_SECRET is set', () => {
+    setValidEnv();
+
+    const config = loadConfig();
+    expect(config.webhook).toBeUndefined();
+  });
+
+  it('exits when WEBHOOK_PORT is out of range', () => {
+    setValidEnv();
+    process.env.WEBHOOK_PORT = '99999';
+    process.env.WEBHOOK_SECRET = 'secret';
+
+    expect(() => loadConfig()).toThrow('process.exit');
+    expect(console.error).toHaveBeenCalledWith(
+      expect.stringContaining('WEBHOOK_PORT must be a number')
+    );
+  });
+
+  it('exits when WEBHOOK_PORT is not a number', () => {
+    setValidEnv();
+    process.env.WEBHOOK_PORT = 'abc';
+    process.env.WEBHOOK_SECRET = 'secret';
+
+    expect(() => loadConfig()).toThrow('process.exit');
+    expect(console.error).toHaveBeenCalledWith(
+      expect.stringContaining('WEBHOOK_PORT must be a number')
+    );
+  });
+
+  it('exits when WEBHOOK_SECRET is missing but WEBHOOK_PORT is set', () => {
+    setValidEnv();
+    process.env.WEBHOOK_PORT = '3000';
+
+    expect(() => loadConfig()).toThrow('process.exit');
+    expect(console.error).toHaveBeenCalledWith(
+      expect.stringContaining('WEBHOOK_SECRET is required')
+    );
+  });
+
+  // ── GitHub App auth ─────────────────────────────────────────────────────────
+
+  it('accepts GitHub App auth env vars (no PAT)', () => {
+    setValidEnv();
+    delete process.env.GITHUB_TOKEN;
+    process.env.GITHUB_APP_ID = '12345';
+    process.env.GITHUB_APP_PEM_PATH = '/tmp/test-key.pem';
+    process.env.GITHUB_APP_INSTALLATION_ID = '67890';
+
+    vi.mocked(fs.existsSync).mockReturnValue(true);
+
+    const config = loadConfig();
+    expect(config.github.appId).toBe(12345);
+    expect(typeof config.github.appId).toBe('number');
+    expect(config.github.installationId).toBe(67890);
+    expect(typeof config.github.installationId).toBe('number');
+  });
+
+  it('exits when partial App env vars provided (appId but no privateKeyPath)', () => {
+    setValidEnv();
+    delete process.env.GITHUB_TOKEN;
+    process.env.GITHUB_APP_ID = '12345';
+
+    expect(() => loadConfig()).toThrow('process.exit');
+    expect(console.error).toHaveBeenCalledWith(
+      expect.stringContaining('Incomplete GitHub App config')
+    );
+  });
+
+  it('exits when partial App env vars provided (appId + privateKeyPath but no installationId)', () => {
+    setValidEnv();
+    delete process.env.GITHUB_TOKEN;
+    process.env.GITHUB_APP_ID = '12345';
+    process.env.GITHUB_APP_PEM_PATH = '/tmp/key.pem';
+
+    expect(() => loadConfig()).toThrow('process.exit');
+    expect(console.error).toHaveBeenCalledWith(
+      expect.stringContaining('Incomplete GitHub App config')
+    );
+  });
+
+  it('exits when App private key file does not exist', () => {
+    setValidEnv();
+    delete process.env.GITHUB_TOKEN;
+    process.env.GITHUB_APP_ID = '12345';
+    process.env.GITHUB_APP_PEM_PATH = '/nonexistent/key.pem';
+    process.env.GITHUB_APP_INSTALLATION_ID = '67890';
+
+    vi.mocked(fs.existsSync).mockReturnValue(false);
+
+    expect(() => loadConfig()).toThrow('process.exit');
+    expect(console.error).toHaveBeenCalledWith(
+      expect.stringContaining('private key file not found')
+    );
+  });
+
+  it('accepts both PAT and App env vars (PAT takes precedence)', () => {
+    setValidEnv();
+    process.env.GITHUB_APP_ID = '12345';
+    process.env.GITHUB_APP_PEM_PATH = '/tmp/key.pem';
+    process.env.GITHUB_APP_INSTALLATION_ID = '67890';
+
+    const config = loadConfig();
+    expect(config.github.token).toBe('ghp_test123');
+  });
+
+  // ── limits ──────────────────────────────────────────────────────────────────
+
+  it('reads MAX_ISSUES_PER_RUN and MAX_TOOL_CALLS_PER_RUN as numbers', () => {
+    setValidEnv();
     process.env.MAX_ISSUES_PER_RUN = '10';
     process.env.MAX_TOOL_CALLS_PER_RUN = '50';
 
@@ -519,15 +317,21 @@ describe('loadConfig', () => {
     expect(config.maxToolCallsPerRun).toBe(50);
   });
 
-  // ── localhost-https warnings ─────────────────────────────────────────────────
+  it('limits are undefined when env vars are not set', () => {
+    setValidEnv();
+
+    const config = loadConfig();
+    expect(config.maxIssuesPerRun).toBeUndefined();
+    expect(config.maxToolCallsPerRun).toBeUndefined();
+  });
+
+  // ── localhost-https warnings ────────────────────────────────────────────────
 
   it('warns on https://localhost baseUrl', () => {
-    const httpsLocalConfig = {
-      ...validConfig,
-      llm: { provider: 'openai-compatible', apiKey: '', model: 'model', baseUrl: 'https://localhost:11434/v1' },
-    };
-    vi.mocked(fs.existsSync).mockReturnValue(true);
-    vi.mocked(fs.readFileSync).mockReturnValue(JSON.stringify(httpsLocalConfig));
+    setValidEnv();
+    process.env.LLM_PROVIDER = 'openai-compatible';
+    delete process.env.LLM_API_KEY;
+    process.env.LLM_BASE_URL = 'https://localhost:11434/v1';
 
     loadConfig();
     expect(console.warn).toHaveBeenCalledWith(
@@ -536,12 +340,10 @@ describe('loadConfig', () => {
   });
 
   it('warns on https://127.0.0.1 baseUrl', () => {
-    const httpsLoopbackConfig = {
-      ...validConfig,
-      llm: { provider: 'openai-compatible', apiKey: '', model: 'model', baseUrl: 'https://127.0.0.1:11434/v1' },
-    };
-    vi.mocked(fs.existsSync).mockReturnValue(true);
-    vi.mocked(fs.readFileSync).mockReturnValue(JSON.stringify(httpsLoopbackConfig));
+    setValidEnv();
+    process.env.LLM_PROVIDER = 'openai-compatible';
+    delete process.env.LLM_API_KEY;
+    process.env.LLM_BASE_URL = 'https://127.0.0.1:11434/v1';
 
     loadConfig();
     expect(console.warn).toHaveBeenCalledWith(
@@ -550,41 +352,22 @@ describe('loadConfig', () => {
   });
 
   it('does NOT warn on http://localhost baseUrl', () => {
-    const httpLocalConfig = {
-      ...validConfig,
-      llm: { provider: 'openai-compatible', apiKey: '', model: 'model', baseUrl: 'http://localhost:11434/v1' },
-    };
-    vi.mocked(fs.existsSync).mockReturnValue(true);
-    vi.mocked(fs.readFileSync).mockReturnValue(JSON.stringify(httpLocalConfig));
+    setValidEnv();
+    process.env.LLM_PROVIDER = 'openai-compatible';
+    delete process.env.LLM_API_KEY;
+    process.env.LLM_BASE_URL = 'http://localhost:11434/v1';
 
     loadConfig();
     expect(console.warn).not.toHaveBeenCalled();
   });
 
   it('does NOT warn on https://api.openai.com baseUrl', () => {
-    const cloudConfig = {
-      ...validConfig,
-      llm: { provider: 'openai-compatible', apiKey: 'sk-test', model: 'model', baseUrl: 'https://api.openai.com/v1' },
-    };
-    vi.mocked(fs.existsSync).mockReturnValue(true);
-    vi.mocked(fs.readFileSync).mockReturnValue(JSON.stringify(cloudConfig));
+    setValidEnv();
+    process.env.LLM_PROVIDER = 'openai-compatible';
+    process.env.LLM_API_KEY = 'sk-test';
+    process.env.LLM_BASE_URL = 'https://api.openai.com/v1';
 
     loadConfig();
     expect(console.warn).not.toHaveBeenCalled();
-  });
-
-  it('logs info when config.json is absent but env vars are sufficient', () => {
-    vi.mocked(fs.existsSync).mockReturnValue(false);
-
-    process.env.GITHUB_OWNER = 'env-owner';
-    process.env.GITHUB_REPO = 'env-repo';
-    process.env.GITHUB_TOKEN = 'ghp_env_token';
-    process.env.LLM_PROVIDER = 'anthropic';
-    process.env.LLM_API_KEY = 'sk-ant-env';
-
-    loadConfig();
-    expect(console.info).toHaveBeenCalledWith(
-      expect.stringContaining('config.json not found')
-    );
   });
 });

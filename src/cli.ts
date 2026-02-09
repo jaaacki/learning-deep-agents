@@ -228,8 +228,7 @@ async function main() {
 
     case 'webhook': {
       if (!config.webhook) {
-        console.error('webhook config section is required in config.json');
-        console.error('Add: "webhook": { "port": 3000, "secret": "your-secret" }');
+        console.error('Webhook config is required. Set WEBHOOK_PORT and WEBHOOK_SECRET in .env');
         process.exit(1);
       }
       console.log('\u{1F916} Deep Agents Webhook Listener\n');
