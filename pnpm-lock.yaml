@@ -23,6 +23,9 @@ importers:
       deepagents:
         specifier: ^1.7.0
         version: 1.7.2(openai@6.18.0(zod@3.25.76))
+      dotenv:
+        specifier: ^17.2.4
+        version: 17.2.4
       express:
         specifier: ^5.2.0
         version: 5.2.1
@@ -730,6 +733,10 @@ packages:
   depd@2.0.0:
     resolution: {integrity: sha512-g7nH6P6dyDioJogAAGprGpCtVImJhpPk/roCzdb3fIh61/s/nPsfR6onyMwkCAR/OlC3yBC0lESvUoQEAssIrw==}
     engines: {node: '>= 0.8'}
+
+  dotenv@17.2.4:
+    resolution: {integrity: sha512-mudtfb4zRB4bVvdj0xRo+e6duH1csJRM8IukBqfTRvHotn9+LBXB8ynAidP9zHqoRC/fsllXgk4kCKlR21fIhw==}
+    engines: {node: '>=12'}
 
   dunder-proto@1.0.1:
     resolution: {integrity: sha512-KIN/nDJBQRcXw0MLVhZE9iQHmG68qAVIBg9CqmUYjmQIhgij9U5MFvrqkUL5FbtyyzZuOeOt0zdeRe4UY7ct+A==}
@@ -1942,6 +1949,8 @@ snapshots:
       - zod-to-json-schema
 
   depd@2.0.0: {}
+
+  dotenv@17.2.4: {}
 
   dunder-proto@1.0.1:
     dependencies:

@@ -4,6 +4,8 @@ services:
     container_name: deepagents-bot
     restart: unless-stopped
     env_file: .env
+    environment:
+      - GITHUB_APP_PEM_PATH=/app/app.pem  # override host path for container
     expose:
       - "3000"
     volumes:

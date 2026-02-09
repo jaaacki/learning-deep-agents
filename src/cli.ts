@@ -1,4 +1,5 @@
 #!/usr/bin/env node
+import 'dotenv/config';
 
 import { loadConfig } from './config.js';
 import { runPollCycle, runAnalyzeSingle, runTriageSingle, showStatus, retractIssue, requestShutdown } from './core.js';
