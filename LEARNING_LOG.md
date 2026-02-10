@@ -5461,6 +5461,38 @@ The system prompt asks it to: read the diff, read relevant files, evaluate the a
 - `cli.ts`: New `review --pr N` subcommand
 - 12 new tests for the tools, 2 updated listener tests for reviewer integration
 
+## Entry 47: SSE Streaming -- Making the Agent's Thinking Visible (Issue #51)
+
+**Date:** 2026-02-10
+**Author:** Builder Agent
+**Issue:** #51 (SSE streaming with thinking and token usage)
+**Builds on:** Entry 46 (Agent-Human Interactive Dialog)
+
+### The problem
+
+The v1.2.0 dialog sent a single JSON response after the agent finished. For simple questions this was fine, but when the agent called multiple tools (fetching issues, reading files), the UI showed "Thinking..." for 10+ seconds with no feedback. Worse, if the LLM call failed silently, the user saw nothing — just an eternal spinner.
+
+### The fix: Server-Sent Events
+
+LangGraph's compiled graph exposes `.streamEvents()` which emits fine-grained events as the agent runs. We pipe these through SSE:
+
+1. `chatStream()` async generator yields typed events (`tool_start`, `tool_end`, `response`, `usage`, `error`)
+2. The `/chat` endpoint writes each event as `data: {...}\n\n`
+3. The frontend reads the stream via `fetch()` + `ReadableStream` and renders each event as it arrives
+
+Token usage is extracted from `on_chat_model_end` events where `usage_metadata` contains input/output counts. These accumulate across multiple LLM calls (tool-calling loop) and are yielded as a final `usage` event.
+
+### UI changes
+
+The dialog now has a collapsible "Thinking" block that shows each tool call with its arguments and result. It auto-collapses after the response arrives, keeping the chat clean. A pulsing status line shows what the agent is currently doing ("Calling list_repo_files...").
+
+### Connections to previous entries
+
+- **Entry 46** (Interactive Dialog): This directly improves the chat experience built there.
+- **Entry 33** (Structured Logging): The server-side logging still works alongside SSE — tool calls are logged to stdout and streamed to the client simultaneously.
+
+---
+
 ## Entry 46: Agent-Human Interactive Dialog -- From Autonomous to Conversational (Issues #48, #49)
 
 **Date:** 2026-02-10

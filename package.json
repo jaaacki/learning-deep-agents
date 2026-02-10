@@ -1,6 +1,6 @@
 {
   "name": "deepagents-github-test",
-  "version": "1.2.0",
+  "version": "1.2.1",
   "description": "Simple test to learn Deep Agents workflow with GitHub issues",
   "type": "module",
   "bin": {

@@ -72,13 +72,77 @@
       font-size: 12px;
     }
 
-    .msg.thinking {
+    .msg.thinking-status {
       align-self: flex-start;
       background: transparent;
       color: #888;
       font-style: italic;
       padding: 4px 14px;
       font-size: 13px;
+    }
+
+    /* Thinking block — collapsible tool calls */
+    .thinking-block {
+      align-self: flex-start;
+      max-width: 80%;
+      font-size: 12px;
+    }
+
+    .thinking-block summary {
+      cursor: pointer;
+      color: #7b6ba0;
+      padding: 4px 0;
+      user-select: none;
+    }
+
+    .thinking-block summary:hover { color: #a98edb; }
+
+    .thinking-steps {
+      margin-top: 4px;
+      padding: 8px 12px;
+      background: #111128;
+      border: 1px solid #2a2a4a;
+      border-radius: 6px;
+      max-height: 300px;
+      overflow-y: auto;
+    }
+
+    .tool-step {
+      padding: 4px 0;
+      border-bottom: 1px solid #1e1e3a;
+      font-family: monospace;
+      font-size: 11px;
+      color: #aaa;
+    }
+
+    .tool-step:last-child { border-bottom: none; }
+
+    .tool-step .tool-name {
+      color: #a98edb;
+      font-weight: 600;
+    }
+
+    .tool-step .tool-args {
+      color: #6b8fb5;
+      margin-left: 8px;
+    }
+
+    .tool-step .tool-result {
+      color: #6b9b6b;
+      display: block;
+      margin-top: 2px;
+      white-space: pre-wrap;
+      max-height: 100px;
+      overflow-y: auto;
+    }
+
+    /* Token usage badge */
+    .usage-badge {
+      align-self: flex-start;
+      font-size: 11px;
+      color: #666;
+      padding: 2px 8px;
+      font-family: monospace;
     }
 
     #input-area {
@@ -117,6 +181,12 @@
 
     #send:hover { background: #6b44a0; }
     #send:disabled { background: #333; cursor: not-allowed; }
+
+    @keyframes pulse {
+      0%, 100% { opacity: 1; }
+      50% { opacity: 0.4; }
+    }
+    .pulsing { animation: pulse 1.5s infinite; }
   </style>
 </head>
 <body>
@@ -140,6 +210,15 @@
     const inputEl = document.getElementById('input');
     const sendBtn = document.getElementById('send');
 
+    function addElement(html, cls) {
+      const div = document.createElement('div');
+      if (cls) div.className = cls;
+      div.innerHTML = html;
+      messagesEl.appendChild(div);
+      messagesEl.scrollTop = messagesEl.scrollHeight;
+      return div;
+    }
+
     function addMessage(text, cls) {
       const div = document.createElement('div');
       div.className = 'msg ' + cls;
@@ -147,6 +226,10 @@
       messagesEl.appendChild(div);
       messagesEl.scrollTop = messagesEl.scrollHeight;
       return div;
+    }
+
+    function escapeHtml(s) {
+      return s.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
     }
 
     async function send() {
@@ -158,7 +241,39 @@
       addMessage(message, 'user');
 
       sendBtn.disabled = true;
-      const thinking = addMessage('Thinking...', 'thinking');
+      const statusEl = addMessage('Thinking...', 'thinking-status pulsing');
+
+      // Thinking block — collects tool calls
+      let thinkingEl = null;
+      let stepsEl = null;
+      let toolCount = 0;
+
+      function ensureThinkingBlock() {
+        if (thinkingEl) return;
+        thinkingEl = addElement(
+          '<details open><summary>Thinking...</summary><div class="thinking-steps"></div></details>',
+          'thinking-block'
+        );
+        stepsEl = thinkingEl.querySelector('.thinking-steps');
+      }
+
+      function addToolStep(html) {
+        ensureThinkingBlock();
+        const step = document.createElement('div');
+        step.className = 'tool-step';
+        step.innerHTML = html;
+        stepsEl.appendChild(step);
+        messagesEl.scrollTop = messagesEl.scrollHeight;
+      }
+
+      function updateThinkingSummary() {
+        if (!thinkingEl) return;
+        const summary = thinkingEl.querySelector('summary');
+        summary.textContent = `Thinking (${toolCount} tool call${toolCount !== 1 ? 's' : ''})`;
+      }
+
+      // Track active tool calls to match start/end
+      const activeTools = new Map();
 
       try {
         const res = await fetch('/chat', {
@@ -167,18 +282,83 @@
           body: JSON.stringify({ message, sessionId }),
         });
 
-        thinking.remove();
-
         if (!res.ok) {
+          statusEl.remove();
           const err = await res.json().catch(() => ({ error: res.statusText }));
           addMessage('Error: ' + (err.error || res.statusText), 'error');
           return;
         }
 
-        const data = await res.json();
-        addMessage(data.response, 'agent');
+        // Read SSE stream
+        const reader = res.body.getReader();
+        const decoder = new TextDecoder();
+        let buffer = '';
+
+        while (true) {
+          const { done, value } = await reader.read();
+          if (done) break;
+
+          buffer += decoder.decode(value, { stream: true });
+          const lines = buffer.split('\n');
+          buffer = lines.pop(); // keep incomplete line in buffer
+
+          for (const line of lines) {
+            if (!line.startsWith('data: ')) continue;
+            const data = line.slice(6);
+            if (data === '[DONE]') continue;
+
+            let event;
+            try { event = JSON.parse(data); } catch { continue; }
+
+            if (event.type === 'tool_start') {
+              toolCount++;
+              const argsStr = event.args ? JSON.stringify(event.args) : '';
+              const shortArgs = argsStr.length > 120 ? argsStr.slice(0, 120) + '...' : argsStr;
+              addToolStep(
+                `<span class="tool-name">${escapeHtml(event.name || '?')}</span>` +
+                `<span class="tool-args">${escapeHtml(shortArgs)}</span>`
+              );
+              statusEl.textContent = `Calling ${event.name}...`;
+              updateThinkingSummary();
+            } else if (event.type === 'tool_end') {
+              const result = event.result || '';
+              const shortResult = result.length > 300 ? result.slice(0, 300) + '...' : result;
+              // Append result to the last tool step
+              if (stepsEl && stepsEl.lastChild) {
+                const resultSpan = document.createElement('span');
+                resultSpan.className = 'tool-result';
+                resultSpan.textContent = shortResult;
+                stepsEl.lastChild.appendChild(resultSpan);
+              }
+              statusEl.textContent = 'Thinking...';
+              messagesEl.scrollTop = messagesEl.scrollHeight;
+            } else if (event.type === 'response') {
+              statusEl.remove();
+              addMessage(event.text || '(empty response)', 'agent');
+            } else if (event.type === 'usage') {
+              const t = event.tokens || {};
+              addElement(
+                `tokens: ${(t.input||0).toLocaleString()} in / ${(t.output||0).toLocaleString()} out / ${(t.total||0).toLocaleString()} total`,
+                'usage-badge'
+              );
+            } else if (event.type === 'error') {
+              statusEl.remove();
+              addMessage('Error: ' + (event.message || 'Unknown error'), 'error');
+            }
+          }
+        }
+
+        // If status element is still there (no response event), remove it
+        if (statusEl.parentNode) statusEl.remove();
+
+        // Collapse thinking block after response arrives
+        if (thinkingEl) {
+          const details = thinkingEl.querySelector('details');
+          if (details) details.open = false;
+        }
+
       } catch (err) {
-        thinking.remove();
+        if (statusEl.parentNode) statusEl.remove();
         addMessage('Network error: ' + err.message, 'error');
       } finally {
         sendBtn.disabled = false;

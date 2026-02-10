@@ -79,7 +79,20 @@ When answering questions:
 }
 
 /**
- * Result of a single chat turn.
+ * SSE event emitted during chat streaming.
+ */
+export interface ChatEvent {
+  type: 'tool_start' | 'tool_end' | 'response' | 'usage' | 'error';
+  name?: string;
+  args?: Record<string, unknown>;
+  result?: string;
+  text?: string;
+  tokens?: { input: number; output: number; total: number };
+  message?: string;
+}
+
+/**
+ * Result of a single chat turn (non-streaming, used by tests).
  */
 export interface ChatResult {
   response: string;
@@ -110,4 +123,59 @@ export async function chat(
     : JSON.stringify(lastMessage?.content ?? '');
 
   return { response, sessionId };
+}
+
+/**
+ * Stream chat events from the agent. Yields tool calls, the final
+ * response, and token usage as they happen — consumed by the SSE endpoint.
+ */
+export async function* chatStream(
+  config: Config,
+  message: string,
+  sessionId: string,
+): AsyncGenerator<ChatEvent> {
+  const agent = createChatAgent(config);
+  let totalInput = 0;
+  let totalOutput = 0;
+  let lastResponse = '';
+
+  try {
+    const stream = agent.streamEvents(
+      { messages: [{ role: 'user', content: message }] },
+      { configurable: { thread_id: sessionId }, version: 'v2' },
+    );
+
+    for await (const ev of stream) {
+      if (ev.event === 'on_tool_start') {
+        yield { type: 'tool_start', name: ev.name, args: ev.data?.input };
+      } else if (ev.event === 'on_tool_end') {
+        const out = ev.data?.output;
+        const txt = typeof out === 'string' ? out : JSON.stringify(out ?? '');
+        yield { type: 'tool_end', name: ev.name, result: txt.slice(0, 1000) };
+      } else if (ev.event === 'on_chat_model_end') {
+        const usage = ev.data?.output?.usage_metadata;
+        if (usage) {
+          totalInput += usage.input_tokens ?? 0;
+          totalOutput += usage.output_tokens ?? 0;
+        }
+        const content = ev.data?.output?.content;
+        if (typeof content === 'string' && content) {
+          lastResponse = content;
+        }
+      }
+    }
+
+    if (lastResponse) {
+      yield { type: 'response', text: lastResponse };
+    }
+
+    yield {
+      type: 'usage',
+      tokens: { input: totalInput, output: totalOutput, total: totalInput + totalOutput },
+    };
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    console.error(`[chat-stream] Error:`, err);
+    yield { type: 'error', message: msg };
+  }
 }
