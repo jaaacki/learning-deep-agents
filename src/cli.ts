@@ -3,7 +3,7 @@ import 'dotenv/config';
 
 import { loadConfig } from './config.js';
 import { runPollCycle, runAnalyzeSingle, runTriageSingle, showStatus, retractIssue, requestShutdown } from './core.js';
-import { startWebhookServer } from './listener.js';
+import { startWebhookServer, startDialogServer } from './listener.js';
 import { runReviewSingle } from './reviewer-agent.js';
 
 // ── Signal handlers for graceful shutdown ────────────────────────────────────
@@ -39,6 +39,7 @@ Commands:
   review            Review a pull request (fetch diff, analyze, post review comment)
   retract           Undo agent actions on an issue (close PR, delete branch, delete comment)
   webhook           Start the HTTP webhook listener for GitHub events
+  dialog            Start the interactive chat server (agent + human conversation)
   status            Show current polling state
   help              Show this help message
 
@@ -60,6 +61,9 @@ Options for 'review':
 Options for 'retract':
   --issue N         Issue number to retract (required)
 
+Options for 'dialog':
+  --port N          Port for the dialog server (default: 3001)
+
 Examples:
   deepagents poll
   deepagents poll --dry-run
@@ -70,6 +74,8 @@ Examples:
   deepagents review --pr 10
   deepagents retract --issue 42
   deepagents webhook
+  deepagents dialog
+  deepagents dialog --port 8080
   deepagents status
 `.trim();
 
@@ -93,6 +99,8 @@ function parseArgs(argv: string[]): { command: string; flags: Record<string, str
       flags['issue'] = args[++i];
     } else if (arg === '--pr' && i + 1 < args.length) {
       flags['pr'] = args[++i];
+    } else if (arg === '--port' && i + 1 < args.length) {
+      flags['port'] = args[++i];
     } else {
       console.error(`Unknown option: ${arg}`);
       console.log(USAGE);
@@ -234,6 +242,21 @@ async function main() {
       }
       console.log('\u{1F916} Deep Agents Webhook Listener\n');
       startWebhookServer(config.webhook, config);
+      // Server runs until process is killed (SIGTERM/SIGINT)
+      break;
+    }
+
+    case 'dialog': {
+      const portStr = flags['port'];
+      const port = typeof portStr === 'string' ? parseInt(portStr, 10) : 3001;
+
+      if (isNaN(port) || port < 1 || port > 65535) {
+        console.error('--port must be a number between 1 and 65535');
+        process.exit(1);
+      }
+
+      console.log('\u{1F916} Deep Agents Interactive Dialog\n');
+      startDialogServer(config, port);
       // Server runs until process is killed (SIGTERM/SIGINT)
       break;
     }

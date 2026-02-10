@@ -1,0 +1,205 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Deep Agents Dialog</title>
+  <style>
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, monospace;
+      background: #1a1a2e;
+      color: #e0e0e0;
+      height: 100vh;
+      display: flex;
+      flex-direction: column;
+    }
+
+    header {
+      padding: 12px 20px;
+      background: #16213e;
+      border-bottom: 1px solid #0f3460;
+      display: flex;
+      align-items: center;
+      gap: 12px;
+    }
+
+    header h1 { font-size: 16px; font-weight: 600; }
+    header .session {
+      font-size: 11px;
+      color: #888;
+      margin-left: auto;
+      font-family: monospace;
+    }
+
+    #messages {
+      flex: 1;
+      overflow-y: auto;
+      padding: 20px;
+      display: flex;
+      flex-direction: column;
+      gap: 12px;
+    }
+
+    .msg {
+      max-width: 80%;
+      padding: 10px 14px;
+      border-radius: 8px;
+      line-height: 1.5;
+      white-space: pre-wrap;
+      word-break: break-word;
+      font-size: 14px;
+    }
+
+    .msg.user {
+      align-self: flex-end;
+      background: #0f3460;
+      color: #e0e0e0;
+    }
+
+    .msg.agent {
+      align-self: flex-start;
+      background: #16213e;
+      border: 1px solid #0f3460;
+    }
+
+    .msg.error {
+      align-self: center;
+      background: #3d0000;
+      border: 1px solid #6b0000;
+      color: #ff6b6b;
+      font-size: 12px;
+    }
+
+    .msg.thinking {
+      align-self: flex-start;
+      background: transparent;
+      color: #888;
+      font-style: italic;
+      padding: 4px 14px;
+      font-size: 13px;
+    }
+
+    #input-area {
+      padding: 12px 20px;
+      background: #16213e;
+      border-top: 1px solid #0f3460;
+      display: flex;
+      gap: 8px;
+    }
+
+    #input {
+      flex: 1;
+      padding: 10px 14px;
+      background: #1a1a2e;
+      border: 1px solid #0f3460;
+      border-radius: 6px;
+      color: #e0e0e0;
+      font-size: 14px;
+      font-family: inherit;
+      outline: none;
+      resize: none;
+    }
+
+    #input:focus { border-color: #533483; }
+
+    #send {
+      padding: 10px 20px;
+      background: #533483;
+      color: white;
+      border: none;
+      border-radius: 6px;
+      cursor: pointer;
+      font-size: 14px;
+      font-family: inherit;
+    }
+
+    #send:hover { background: #6b44a0; }
+    #send:disabled { background: #333; cursor: not-allowed; }
+  </style>
+</head>
+<body>
+  <header>
+    <h1>Deep Agents Dialog</h1>
+    <span class="session" id="session-display"></span>
+  </header>
+
+  <div id="messages"></div>
+
+  <div id="input-area">
+    <textarea id="input" rows="1" placeholder="Ask about the codebase..." autofocus></textarea>
+    <button id="send">Send</button>
+  </div>
+
+  <script>
+    const sessionId = crypto.randomUUID();
+    document.getElementById('session-display').textContent = 'session: ' + sessionId.slice(0, 8);
+
+    const messagesEl = document.getElementById('messages');
+    const inputEl = document.getElementById('input');
+    const sendBtn = document.getElementById('send');
+
+    function addMessage(text, cls) {
+      const div = document.createElement('div');
+      div.className = 'msg ' + cls;
+      div.textContent = text;
+      messagesEl.appendChild(div);
+      messagesEl.scrollTop = messagesEl.scrollHeight;
+      return div;
+    }
+
+    async function send() {
+      const message = inputEl.value.trim();
+      if (!message) return;
+
+      inputEl.value = '';
+      inputEl.style.height = 'auto';
+      addMessage(message, 'user');
+
+      sendBtn.disabled = true;
+      const thinking = addMessage('Thinking...', 'thinking');
+
+      try {
+        const res = await fetch('/chat', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ message, sessionId }),
+        });
+
+        thinking.remove();
+
+        if (!res.ok) {
+          const err = await res.json().catch(() => ({ error: res.statusText }));
+          addMessage('Error: ' + (err.error || res.statusText), 'error');
+          return;
+        }
+
+        const data = await res.json();
+        addMessage(data.response, 'agent');
+      } catch (err) {
+        thinking.remove();
+        addMessage('Network error: ' + err.message, 'error');
+      } finally {
+        sendBtn.disabled = false;
+        inputEl.focus();
+      }
+    }
+
+    sendBtn.addEventListener('click', send);
+
+    inputEl.addEventListener('keydown', (e) => {
+      if (e.key === 'Enter' && !e.shiftKey) {
+        e.preventDefault();
+        send();
+      }
+    });
+
+    // Auto-resize textarea
+    inputEl.addEventListener('input', () => {
+      inputEl.style.height = 'auto';
+      inputEl.style.height = Math.min(inputEl.scrollHeight, 120) + 'px';
+    });
+  </script>
+</body>
+</html>

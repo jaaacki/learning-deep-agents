@@ -158,6 +158,7 @@ Incremental improvements after the v1.0.0 milestone. These are not new phases �
 | Version | Change | Status |
 |---------|--------|--------|
 | v1.1.0 | Consolidate config into `.env` as single source of truth (#47) | ✓ v1.1.0 |
+| v1.2.0 | Agent-human interactive dialog (#48, #49) | ✓ v1.2.0 |
 
 ---
 
