@@ -22,11 +22,12 @@ vi.mock('../src/reviewer-agent.js', () => ({
 
 vi.mock('../src/chat-agent.js', () => ({
   chat: vi.fn().mockResolvedValue({ response: 'mock response', sessionId: 'test-session' }),
+  chatStream: vi.fn(),
 }));
 
 import { runAnalyzeSingle } from '../src/core.js';
 import { runReviewSingle } from '../src/reviewer-agent.js';
-import { chat } from '../src/chat-agent.js';
+import { chat, chatStream } from '../src/chat-agent.js';
 
 // ── verifySignature ──────────────────────────────────────────────────────────
 
@@ -683,10 +684,32 @@ describe('createDialogApp', () => {
     });
   }
 
+  /** Helper: create a mock async generator that yields the given events. */
+  function mockStream(events: any[]) {
+    return async function* () {
+      for (const e of events) yield e;
+    };
+  }
+
+  /** Parse SSE body string into an array of parsed event objects. */
+  function parseSSE(raw: string): any[] {
+    return raw
+      .split('\n')
+      .filter((l: string) => l.startsWith('data: '))
+      .map((l: string) => l.slice(6))
+      .filter((d: string) => d !== '[DONE]')
+      .map((d: string) => { try { return JSON.parse(d); } catch { return d; } });
+  }
+
   beforeEach(() => {
     vi.spyOn(console, 'log').mockImplementation(() => {});
     vi.spyOn(console, 'error').mockImplementation(() => {});
-    vi.mocked(chat).mockReset().mockResolvedValue({ response: 'Hello from agent', sessionId: 'sess-1' });
+    vi.mocked(chatStream).mockReset().mockImplementation(
+      mockStream([
+        { type: 'response', text: 'Hello from agent' },
+        { type: 'usage', tokens: { input: 10, output: 5, total: 15 } },
+      ]) as any,
+    );
   });
 
   afterEach(() => {
@@ -709,16 +732,43 @@ describe('createDialogApp', () => {
     expect(res.headers['content-type']).toContain('text/html');
   });
 
-  it('POST /chat returns agent response for valid message', async () => {
+  it('POST /chat streams SSE events for valid message', async () => {
     const app = createDialogApp(mockConfig);
     const res = await inject(app, 'POST', '/chat', {
       body: JSON.stringify({ message: 'What does this project do?', sessionId: 'test-session' }),
     });
 
     expect(res.status).toBe(200);
-    expect(res.body.response).toBe('Hello from agent');
-    expect(res.body.sessionId).toBe('sess-1');
-    expect(chat).toHaveBeenCalledWith(mockConfig, 'What does this project do?', 'test-session');
+    expect(res.headers['content-type']).toContain('text/event-stream');
+
+    const events = parseSSE(res.body);
+    expect(events).toEqual([
+      { type: 'response', text: 'Hello from agent' },
+      { type: 'usage', tokens: { input: 10, output: 5, total: 15 } },
+    ]);
+    expect(chatStream).toHaveBeenCalledWith(mockConfig, 'What does this project do?', 'test-session');
+  });
+
+  it('POST /chat streams tool calls in thinking events', async () => {
+    vi.mocked(chatStream).mockImplementation(
+      mockStream([
+        { type: 'tool_start', name: 'list_repo_files', args: { path: 'src' } },
+        { type: 'tool_end', name: 'list_repo_files', result: 'cli.ts\ncore.ts' },
+        { type: 'response', text: 'Found 2 files.' },
+        { type: 'usage', tokens: { input: 100, output: 20, total: 120 } },
+      ]) as any,
+    );
+
+    const app = createDialogApp(mockConfig);
+    const res = await inject(app, 'POST', '/chat', {
+      body: JSON.stringify({ message: 'list files', sessionId: 's1' }),
+    });
+
+    const events = parseSSE(res.body);
+    expect(events[0]).toEqual({ type: 'tool_start', name: 'list_repo_files', args: { path: 'src' } });
+    expect(events[1]).toEqual({ type: 'tool_end', name: 'list_repo_files', result: 'cli.ts\ncore.ts' });
+    expect(events[2]).toEqual({ type: 'response', text: 'Found 2 files.' });
+    expect(events[3].type).toBe('usage');
   });
 
   it('POST /chat returns 400 when message is missing', async () => {
@@ -747,20 +797,22 @@ describe('createDialogApp', () => {
     });
 
     expect(res.status).toBe(200);
-    // chat() should have been called with some generated UUID
-    expect(chat).toHaveBeenCalledWith(mockConfig, 'Hello', expect.any(String));
+    expect(chatStream).toHaveBeenCalledWith(mockConfig, 'Hello', expect.any(String));
   });
 
-  it('POST /chat returns 500 when chat agent throws', async () => {
-    vi.mocked(chat).mockRejectedValueOnce(new Error('LLM down'));
+  it('POST /chat streams error event when chatStream throws', async () => {
+    vi.mocked(chatStream).mockImplementation(() => {
+      throw new Error('LLM down');
+    });
 
     const app = createDialogApp(mockConfig);
     const res = await inject(app, 'POST', '/chat', {
       body: JSON.stringify({ message: 'Hello', sessionId: 's1' }),
     });
 
-    expect(res.status).toBe(500);
-    expect(res.body.error).toBe('Chat agent failed');
+    expect(res.status).toBe(200);
+    const events = parseSSE(res.body);
+    expect(events).toContainEqual({ type: 'error', message: 'Chat agent failed' });
     expect(console.error).toHaveBeenCalledWith(
       expect.stringContaining('Error for session s1'),
       expect.any(Error),

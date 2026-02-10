@@ -9,6 +9,24 @@
 
 ---
 
+## v1.2.1 — 2026-02-10
+
+**SSE streaming with thinking display and token usage (Issue #51).** The dialog UI now shows agent reasoning in real-time.
+
+### Added
+- **`chatStream()` async generator** in `chat-agent.ts` — streams `tool_start`, `tool_end`, `response`, `usage`, and `error` events via LangGraph `streamEvents()` API
+- **Collapsible "Thinking" block** in dialog UI — shows each tool call name, args, and result as they happen
+- **Token usage badge** — displays input/output/total token counts after each response
+- **Pulsing status indicator** — shows what the agent is currently doing (e.g., "Calling list_repo_files...")
+- 1 new test for tool call streaming events (267 total)
+
+### Changed
+- `/chat` endpoint switched from single JSON response to SSE (`text/event-stream`) format
+- Dialog UI reads SSE stream via fetch + ReadableStream instead of awaiting JSON
+- Thinking block auto-collapses after response arrives
+
+---
+
 ## v1.2.0 — 2026-02-10
 
 **Agent-human interactive dialog (Issues #48, #49).** Humans can now chat directly with the agent via a web UI or API endpoint.

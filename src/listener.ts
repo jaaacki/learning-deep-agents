@@ -6,7 +6,7 @@ import type { Request, Response } from 'express';
 import type { Config } from './config.js';
 import { runAnalyzeSingle } from './core.js';
 import { runReviewSingle } from './reviewer-agent.js';
-import { chat } from './chat-agent.js';
+import { chat, chatStream } from './chat-agent.js';
 
 /**
  * Webhook listener configuration.
@@ -368,7 +368,7 @@ export function createDialogApp(config: Config): express.Express {
     res.sendFile(path.join(getStaticDir(), 'dialog.html'));
   });
 
-  // Chat endpoint
+  // Chat endpoint — SSE stream with thinking, response, and token usage
   app.post('/chat', async (req: Request, res: Response) => {
     const { message, sessionId } = req.body as { message?: string; sessionId?: string };
 
@@ -381,13 +381,24 @@ export function createDialogApp(config: Config): express.Express {
 
     console.log(`[chat] Session ${sid}: "${message.slice(0, 80)}${message.length > 80 ? '...' : ''}"`);
 
+    // SSE headers
+    res.writeHead(200, {
+      'Content-Type': 'text/event-stream',
+      'Cache-Control': 'no-cache',
+      'Connection': 'keep-alive',
+    });
+
     try {
-      const result = await chat(config, message, sid);
-      res.json({ response: result.response, sessionId: result.sessionId });
+      for await (const event of chatStream(config, message, sid)) {
+        res.write(`data: ${JSON.stringify(event)}\n\n`);
+      }
     } catch (err) {
       console.error(`[chat] Error for session ${sid}:`, err);
-      res.status(500).json({ error: 'Chat agent failed' });
+      res.write(`data: ${JSON.stringify({ type: 'error', message: 'Chat agent failed' })}\n\n`);
     }
+
+    res.write('data: [DONE]\n\n');
+    res.end();
   });
 
   return app;
