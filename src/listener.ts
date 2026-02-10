@@ -1,9 +1,12 @@
 import { createHmac, timingSafeEqual } from 'crypto';
+import path from 'path';
+import { fileURLToPath } from 'url';
 import express from 'express';
 import type { Request, Response } from 'express';
 import type { Config } from './config.js';
 import { runAnalyzeSingle } from './core.js';
 import { runReviewSingle } from './reviewer-agent.js';
+import { chat } from './chat-agent.js';
 
 /**
  * Webhook listener configuration.
@@ -327,6 +330,83 @@ export function startWebhookServer(config: WebhookConfig, fullConfig?: Config) {
     console.log(`[webhook] Health check: http://localhost:${config.port}/health`);
     console.log(`[webhook] Webhook URL:  http://localhost:${config.port}/webhook`);
     console.log('[webhook] Waiting for GitHub events...\n');
+  });
+
+  return server;
+}
+
+// ── Dialog (chat) server ─────────────────────────────────────────────────────
+
+/**
+ * Resolve the path to the static/ directory relative to this file.
+ */
+function getStaticDir(): string {
+  const __dirname = path.dirname(fileURLToPath(import.meta.url));
+  return path.resolve(__dirname, '..', 'static');
+}
+
+/**
+ * Create an Express app for the interactive dialog (chat) interface.
+ *
+ * Endpoints:
+ * - GET  /health  — health check
+ * - GET  /        — serves dialog.html
+ * - POST /chat    — sends a message to the chat agent, returns the response
+ */
+export function createDialogApp(config: Config): express.Express {
+  const app = express();
+
+  app.use(express.json());
+
+  // Health check
+  app.get('/health', (_req: Request, res: Response) => {
+    res.json({ status: 'ok', timestamp: new Date().toISOString() });
+  });
+
+  // Serve dialog.html at root
+  app.get('/', (_req: Request, res: Response) => {
+    res.sendFile(path.join(getStaticDir(), 'dialog.html'));
+  });
+
+  // Chat endpoint
+  app.post('/chat', async (req: Request, res: Response) => {
+    const { message, sessionId } = req.body as { message?: string; sessionId?: string };
+
+    if (!message || typeof message !== 'string') {
+      res.status(400).json({ error: 'Missing or invalid "message" field' });
+      return;
+    }
+
+    const sid = sessionId || crypto.randomUUID();
+
+    console.log(`[chat] Session ${sid}: "${message.slice(0, 80)}${message.length > 80 ? '...' : ''}"`);
+
+    try {
+      const result = await chat(config, message, sid);
+      res.json({ response: result.response, sessionId: result.sessionId });
+    } catch (err) {
+      console.error(`[chat] Error for session ${sid}:`, err);
+      res.status(500).json({ error: 'Chat agent failed' });
+    }
+  });
+
+  return app;
+}
+
+/**
+ * Start the dialog (chat) HTTP server.
+ *
+ * Returns the HTTP server instance for graceful shutdown.
+ */
+export function startDialogServer(config: Config, port: number) {
+  const app = createDialogApp(config);
+
+  const server = app.listen(port, () => {
+    console.log(`[dialog] Listening on port ${port}`);
+    console.log(`[dialog] Chat UI:      http://localhost:${port}/`);
+    console.log(`[dialog] Chat API:     http://localhost:${port}/chat`);
+    console.log(`[dialog] Health check: http://localhost:${port}/health`);
+    console.log('[dialog] Ready for conversations.\n');
   });
 
   return server;

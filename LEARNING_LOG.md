@@ -5461,6 +5461,47 @@ The system prompt asks it to: read the diff, read relevant files, evaluate the a
 - `cli.ts`: New `review --pr N` subcommand
 - 12 new tests for the tools, 2 updated listener tests for reviewer integration
 
+## Entry 46: Agent-Human Interactive Dialog -- From Autonomous to Conversational (Issues #48, #49)
+
+**Date:** 2026-02-10
+**Author:** Builder Agent
+**Issues:** #48 (chat endpoint), #49 (dialog.html)
+**Builds on:** Entry 44 (Reviewer Bot), Entry 31 (Webhook Listener)
+
+### Why this design
+
+Until now, the agent was purely autonomous: it received GitHub events and acted on them without human interaction. But LangChain and the DeepAgents framework already have human-in-the-loop patterns built in — `createDeepAgent` accepts a `checkpointer` parameter for conversation state, and the agent's `invoke()` method supports `thread_id` for session isolation. We're not building something new; we're wiring up what's already there.
+
+### The pattern: LangGraph checkpointer for multi-turn chat
+
+The key insight is that LangGraph's `MemorySaver` gives us conversation state for free. Each session gets a `thread_id`, and the checkpointer automatically accumulates messages across invocations:
+
+```typescript
+const agent = createDeepAgent({ model, tools, systemPrompt, checkpointer });
+
+// Each call with the same thread_id continues the conversation
+await agent.invoke(
+  { messages: [{ role: 'user', content: 'What does this project do?' }] },
+  { configurable: { thread_id: sessionId } },
+);
+```
+
+No custom message history management, no database — the framework handles it.
+
+### What could go wrong
+
+- **Memory grows unbounded** — `MemorySaver` is in-memory, so long sessions or many concurrent sessions will consume memory. For a learning project this is fine; production would need a persistent checkpointer (SQLite, PostgreSQL).
+- **Agent creates new tools per request** — `createChatAgent()` is called per chat message, which creates fresh Octokit clients and tool instances. This is intentional for simplicity and matches the existing pattern (analysis agent is also created per invocation). If latency becomes an issue, agent instances could be cached per session.
+- **Circuit breaker is per-invocation** — each chat turn gets a fresh 15-call budget. A user can't exhaust the circuit breaker across turns, which is the right behavior for interactive use.
+
+### Connections to previous entries
+
+- **Entry 31** (Webhook Listener): The dialog server reuses the same Express pattern — `createDialogApp()` mirrors `createWebhookApp()`. Both are testable factories that return an Express app.
+- **Entry 44** (Reviewer Bot): The chat agent uses the same `createModel()` and read-only tool factories, following the established pattern of agent-specific tool subsets.
+- **Entry 16** (Test Infrastructure): The dialog tests reuse the same `inject()` HTTP helper pattern from webhook tests — no supertest dependency.
+
+---
+
 ## Entry 45: Consolidating Config into .env -- Single Source of Truth (Issue #47)
 
 **Date:** 2026-02-09

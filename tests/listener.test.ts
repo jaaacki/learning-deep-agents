@@ -2,6 +2,7 @@ import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { createHmac } from 'crypto';
 import {
   createWebhookApp,
+  createDialogApp,
   verifySignature,
   handlePullRequestEvent,
   handleWebhookEvent,
@@ -19,8 +20,13 @@ vi.mock('../src/reviewer-agent.js', () => ({
   runReviewSingle: vi.fn().mockResolvedValue(undefined),
 }));
 
+vi.mock('../src/chat-agent.js', () => ({
+  chat: vi.fn().mockResolvedValue({ response: 'mock response', sessionId: 'test-session' }),
+}));
+
 import { runAnalyzeSingle } from '../src/core.js';
 import { runReviewSingle } from '../src/reviewer-agent.js';
+import { chat } from '../src/chat-agent.js';
 
 // ── verifySignature ──────────────────────────────────────────────────────────
 
@@ -612,6 +618,151 @@ describe('handleIssuesEvent', () => {
     expect(result.issueNumber).toBe(99);
     expect(console.error).toHaveBeenCalledWith(
       expect.stringContaining('Analysis failed'),
+      expect.any(Error),
+    );
+  });
+});
+
+// ── createDialogApp ─────────────────────────────────────────────────────────
+
+describe('createDialogApp', () => {
+  const mockConfig = {
+    github: { owner: 'owner', repo: 'repo', token: 'ghp_test' },
+    llm: { provider: 'anthropic', apiKey: 'sk-test', model: 'claude-sonnet' },
+  } as any;
+
+  /**
+   * Inject a request into the Express app and capture the response.
+   */
+  async function inject(
+    app: ReturnType<typeof createDialogApp>,
+    method: string,
+    path: string,
+    opts: { body?: string; headers?: Record<string, string> } = {},
+  ): Promise<{ status: number; body: any; headers: Record<string, string> }> {
+    const { default: http } = await import('http');
+
+    return new Promise((resolve, reject) => {
+      const server = app.listen(0, () => {
+        const addr = server.address();
+        if (!addr || typeof addr === 'string') { server.close(); reject(new Error('bad addr')); return; }
+
+        const req = http.request(
+          {
+            hostname: '127.0.0.1',
+            port: addr.port,
+            path,
+            method,
+            headers: {
+              ...(opts.body ? { 'content-type': 'application/json' } : {}),
+              ...opts.headers,
+            },
+          },
+          (res) => {
+            let data = '';
+            res.on('data', (chunk) => { data += chunk; });
+            res.on('end', () => {
+              server.close();
+              const respHeaders: Record<string, string> = {};
+              for (const [k, v] of Object.entries(res.headers)) {
+                if (typeof v === 'string') respHeaders[k] = v;
+              }
+              try {
+                resolve({ status: res.statusCode!, body: JSON.parse(data), headers: respHeaders });
+              } catch {
+                resolve({ status: res.statusCode!, body: data, headers: respHeaders });
+              }
+            });
+          },
+        );
+
+        req.on('error', (err) => { server.close(); reject(err); });
+        if (opts.body) req.write(opts.body);
+        req.end();
+      });
+    });
+  }
+
+  beforeEach(() => {
+    vi.spyOn(console, 'log').mockImplementation(() => {});
+    vi.spyOn(console, 'error').mockImplementation(() => {});
+    vi.mocked(chat).mockReset().mockResolvedValue({ response: 'Hello from agent', sessionId: 'sess-1' });
+  });
+
+  afterEach(() => {
+    vi.restoreAllMocks();
+  });
+
+  it('GET /health returns 200', async () => {
+    const app = createDialogApp(mockConfig);
+    const res = await inject(app, 'GET', '/health');
+
+    expect(res.status).toBe(200);
+    expect(res.body.status).toBe('ok');
+  });
+
+  it('GET / serves dialog.html', async () => {
+    const app = createDialogApp(mockConfig);
+    const res = await inject(app, 'GET', '/');
+
+    expect(res.status).toBe(200);
+    expect(res.headers['content-type']).toContain('text/html');
+  });
+
+  it('POST /chat returns agent response for valid message', async () => {
+    const app = createDialogApp(mockConfig);
+    const res = await inject(app, 'POST', '/chat', {
+      body: JSON.stringify({ message: 'What does this project do?', sessionId: 'test-session' }),
+    });
+
+    expect(res.status).toBe(200);
+    expect(res.body.response).toBe('Hello from agent');
+    expect(res.body.sessionId).toBe('sess-1');
+    expect(chat).toHaveBeenCalledWith(mockConfig, 'What does this project do?', 'test-session');
+  });
+
+  it('POST /chat returns 400 when message is missing', async () => {
+    const app = createDialogApp(mockConfig);
+    const res = await inject(app, 'POST', '/chat', {
+      body: JSON.stringify({ sessionId: 'test-session' }),
+    });
+
+    expect(res.status).toBe(400);
+    expect(res.body.error).toContain('Missing');
+  });
+
+  it('POST /chat returns 400 when message is empty string', async () => {
+    const app = createDialogApp(mockConfig);
+    const res = await inject(app, 'POST', '/chat', {
+      body: JSON.stringify({ message: '', sessionId: 'test-session' }),
+    });
+
+    expect(res.status).toBe(400);
+  });
+
+  it('POST /chat generates sessionId when not provided', async () => {
+    const app = createDialogApp(mockConfig);
+    const res = await inject(app, 'POST', '/chat', {
+      body: JSON.stringify({ message: 'Hello' }),
+    });
+
+    expect(res.status).toBe(200);
+    // chat() should have been called with some generated UUID
+    expect(chat).toHaveBeenCalledWith(mockConfig, 'Hello', expect.any(String));
+  });
+
+  it('POST /chat returns 500 when chat agent throws', async () => {
+    vi.mocked(chat).mockRejectedValueOnce(new Error('LLM down'));
+
+    const app = createDialogApp(mockConfig);
+    const res = await inject(app, 'POST', '/chat', {
+      body: JSON.stringify({ message: 'Hello', sessionId: 's1' }),
+    });
+
+    expect(res.status).toBe(500);
+    expect(res.body.error).toBe('Chat agent failed');
+    expect(console.error).toHaveBeenCalledWith(
+      expect.stringContaining('Error for session s1'),
       expect.any(Error),
     );
   });

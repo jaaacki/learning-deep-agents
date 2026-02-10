@@ -216,6 +216,7 @@ Choose the mode that fits your use case:
 |------|----------|--------------|
 | **Cron polling** | Simple, low-volume repos | Cron job runs `poll.sh` on a schedule |
 | **Webhook (local)** | Development / testing | `pnpm webhook` listens for GitHub events |
+| **Dialog** | Interactive chat | `pnpm dialog` opens a web UI for human-agent conversation |
 | **Docker + Caddy** | Production deployment | Containerized webhook listener with auto-HTTPS |
 
 ### Cron polling
@@ -278,6 +279,27 @@ pnpm webhook
 
 The server exposes two endpoints:
 - `POST /webhook` — receives GitHub events (verified with HMAC-SHA256)
+- `GET /health` — returns `{ "status": "ok" }`
+
+### Interactive dialog (chat)
+
+Chat directly with the agent via a web UI. The agent has read-only access to the repository — it can browse files, list issues, and answer questions about the codebase.
+
+```bash
+pnpm dialog
+```
+
+Open http://localhost:3001/ in your browser. The chat UI supports multi-turn conversations with session state.
+
+To use a different port:
+
+```bash
+pnpm run cli dialog --port 8080
+```
+
+The dialog server exposes three endpoints:
+- `GET /` — serves the chat UI (`dialog.html`)
+- `POST /chat` — accepts `{ message, sessionId }`, returns `{ response, sessionId }`
 - `GET /health` — returns `{ "status": "ok" }`
 
 ### Docker deployment
@@ -434,6 +456,10 @@ pnpm run cli retract --issue 42
 # Start webhook listener (real-time, replaces cron)
 pnpm run cli webhook
 
+# Start the interactive dialog (chat with the agent)
+pnpm run cli dialog
+pnpm run cli dialog --port 8080
+
 # Show current polling state
 pnpm run cli status
 
@@ -453,7 +479,7 @@ pnpm test
 pnpm run test:watch
 ```
 
-259 tests across 9 test files using [vitest](https://vitest.dev/) with mocked external dependencies (Octokit, LLM constructors, filesystem). No real API calls are made during testing.
+266 tests across 9 test files using [vitest](https://vitest.dev/) with mocked external dependencies (Octokit, LLM constructors, filesystem). No real API calls are made during testing.
 
 ## Troubleshooting
 
@@ -490,7 +516,8 @@ learning-deep-agents/
     reviewer-agent.ts -- PR reviewer agent (diff reader, source context, review submitter)
     logger.ts         -- Structured logging wrapper for tool calls
     utils.ts          -- Retry with exponential backoff for API calls
-    listener.ts       -- Express webhook server with HMAC-SHA256 verification
+    chat-agent.ts     -- Chat agent for human-agent interaction (read-only tools + checkpointer)
+    listener.ts       -- Express webhook server, dialog server, HMAC-SHA256 verification
   tests/
     core.test.ts      -- Unit tests for core logic, state, graceful shutdown
     github-tools.test.ts -- Idempotency and tool tests (mocked Octokit)
@@ -502,6 +529,8 @@ learning-deep-agents/
     utils.test.ts     -- Retry logic and error classification tests
     listener.test.ts  -- Webhook endpoint and signature verification tests
   issues/             -- Generated: detailed analysis files
+  static/
+    dialog.html       -- Chat UI for testing agent-human interaction
   .env                -- Your credentials and settings (git-ignored, single source of truth)
   .env.example        -- Comprehensive template for .env
   last_poll.json      -- Generated: polling state (git-ignored)

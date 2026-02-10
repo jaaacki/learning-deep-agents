@@ -9,6 +9,26 @@
 
 ---
 
+## v1.2.0 — 2026-02-10
+
+**Agent-human interactive dialog (Issues #48, #49).** Humans can now chat directly with the agent via a web UI or API endpoint.
+
+### Added
+- **Chat agent** (`src/chat-agent.ts`) — conversational agent using the same LLM and read-only GitHub tools, with LangGraph `MemorySaver` checkpointer for multi-turn conversation state
+- **`/chat` POST endpoint** (Issue #48) — accepts `{ message, sessionId }`, returns agent response with conversation continuity per session
+- **`dialog.html`** (Issue #49) — vanilla HTML/CSS/JS chat UI served at `GET /`, dark theme, auto-resizing input, session management
+- **`createDialogApp()`** and **`startDialogServer()`** factories in `listener.ts`
+- **`deepagents dialog`** CLI subcommand with `--port N` option (default: 3001)
+- `pnpm dialog` script shorthand
+- `@langchain/langgraph` added as direct dependency (was transitive via deepagents)
+- 7 new tests in `tests/listener.test.ts`: health check, HTML serving, chat endpoint, validation, error handling
+
+### Changed
+- `listener.ts` imports `chat-agent.js` for the dialog endpoint
+- CLI help text updated with `dialog` command and examples
+
+---
+
 ## v1.1.0 — 2026-02-09
 
 **Consolidate configuration into `.env` as single source of truth (Issue #47).**
